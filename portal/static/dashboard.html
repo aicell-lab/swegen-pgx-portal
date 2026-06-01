@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dashboard — SweGen PGx Portal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/portal.css">
+</head>
+<body>
+<header>
+  <h1><a href="/">SweGen PGx Portal</a></h1>
+  <nav id="nav"><span class="muted">Loading…</span></nav>
+</header>
+<main class="container">
+
+<section class="hero">
+  <h2>Your dashboard</h2>
+  <p id="userLine" class="muted"></p>
+</section>
+
+<div id="statusCard" class="card hidden">
+  <h3>Status</h3>
+  <p id="statusText" class="meta"></p>
+  <div id="statusActions"></div>
+</div>
+
+<div id="signupCard" class="card hidden">
+  <h3>Request access</h3>
+  <p>Tell the admins who you are and what you'd like to study. The data
+    owner (Adam Ameur, Uppsala University) reviews each request and
+    approves new users.</p>
+  <div class="field">
+    <label>Full name</label>
+    <input id="signupName" placeholder="Jane Doe">
+  </div>
+  <div class="field">
+    <label>Affiliation</label>
+    <input id="signupAffiliation" placeholder="Karolinska Institutet, Stockholm">
+  </div>
+  <div class="field">
+    <label>Reason for access</label>
+    <textarea id="signupReason" placeholder="What pharmacogenomic question do you want to explore? (a sentence or two is fine)"></textarea>
+  </div>
+  <div id="signupErr" class="muted"></div>
+  <button class="btn" id="signupBtn">Send request</button>
+</div>
+
+<div id="sessionsCard" class="card hidden">
+  <div class="flex-between">
+    <h3 style="margin:0">Your sessions</h3>
+    <button class="btn btn-small" id="newSessionBtn">New session</button>
+  </div>
+  <p class="meta">Each session is a separate Jupyter kernel. The agent URL is
+    a secret — anyone with the URL can run code in your session.</p>
+  <div id="sessionList"></div>
+</div>
+
+<div id="responsibleCard" class="card hidden">
+  <h3>Responsible use reminder</h3>
+  <p>This kernel is shared with other approved users. <b>Do not paste
+    sensitive data</b> into your agent prompts or the code you submit.
+    The full sensitivity contract for this dataset is the
+    <a href="/api/config" id="contractLink">SECURITY_CONTRACT</a> — the
+    Guardian agent enforces it on every call.</p>
+</div>
+
+</main>
+<footer>SweGen PGx Portal — hosted by SciLifeLab / KTH.</footer>
+
+<script src="/static/portal.js"></script>
+<script>
+(async () => {
+  const { api, getMe, logout, fmtTime, el, copyToClipboard, toast } = window.PortalAPI;
+
+  const nav = document.getElementById("nav");
+  const me = await getMe();
+  if (!me) { location.href = "/"; return; }
+  nav.innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="logoutLink">Sign out</a>`;
+  document.getElementById("logoutLink").onclick = (ev) => { ev.preventDefault(); logout(); };
+
+  document.getElementById("userLine").innerHTML = `Signed in as <b>${me.email}</b>`;
+
+  const statusCard = document.getElementById("statusCard");
+  const statusText = document.getElementById("statusText");
+  const statusActions = document.getElementById("statusActions");
+  const signupCard = document.getElementById("signupCard");
+  const sessionsCard = document.getElementById("sessionsCard");
+  const sessionList = document.getElementById("sessionList");
+  const responsibleCard = document.getElementById("responsibleCard");
+
+  statusCard.classList.remove("hidden");
+  if (me.status === "approved") {
+    statusText.innerHTML = '<span class="pill approved">approved</span> &nbsp; Welcome — you can create and use analysis sessions below.';
+    sessionsCard.classList.remove("hidden");
+    responsibleCard.classList.remove("hidden");
+    await refreshSessions();
+  } else if (me.status === "pending") {
+    statusText.innerHTML = '<span class="pill pending">pending</span> &nbsp; Your request is awaiting admin review. You will receive an email at <b>' + me.email + '</b> once a decision is made.';
+    if (me.reason) statusText.innerHTML += `<br/><span class="muted">Reason you gave:</span> ${me.reason}`;
+  } else if (me.status === "rejected") {
+    statusText.innerHTML = '<span class="pill rejected">declined</span> &nbsp; Your request was not approved. Reach out to the admins if you think this was a mistake.';
+  } else {
+    statusText.innerHTML = 'You have not requested access yet.';
+    signupCard.classList.remove("hidden");
+  }
+
+  document.getElementById("signupBtn").onclick = async () => {
+    const name = document.getElementById("signupName").value.trim();
+    const affiliation = document.getElementById("signupAffiliation").value.trim();
+    const reason = document.getElementById("signupReason").value.trim();
+    if (!reason) {
+      document.getElementById("signupErr").innerHTML = 'Please tell us why you want access — even one sentence is fine.';
+      return;
+    }
+    try {
+      await api("/api/signup", { method: "POST", body: JSON.stringify({ name, affiliation, reason }) });
+      location.reload();
+    } catch (e) { document.getElementById("signupErr").textContent = e.message; }
+  };
+
+  document.getElementById("newSessionBtn").onclick = async () => {
+    const label = prompt("Label for this session (optional, e.g. 'AF spectrum exploration'):", "");
+    if (label === null) return;
+    try {
+      const r = await api("/api/sessions", { method: "POST", body: JSON.stringify({ label: label || "" }) });
+      toast("Session created — copy the agent URL into your AI agent.");
+      await refreshSessions();
+    } catch (e) { toast("Failed: " + e.message, true); }
+  };
+
+  async function refreshSessions() {
+    const { sessions } = await api("/api/sessions");
+    sessionList.innerHTML = "";
+    if (sessions.length === 0) {
+      sessionList.appendChild(el("p", { class: "muted" }, "No sessions yet. Click ", el("b", {}, "New session"), " to create one."));
+      return;
+    }
+    for (const s of sessions) {
+      const card = el("div", { class: "card", style: "margin-top:12px" });
+      card.appendChild(el("div", { class: "flex-between" },
+        el("div", {},
+          el("b", {}, s.label || ("session " + s.session_id.slice(0, 8))),
+          " ",
+          el("span", { class: "pill " + (s.status === "active" ? "active" : "ended") }, s.status),
+        ),
+        el("div", { class: "muted", style: "font-size:12px" },
+          `created ${fmtTime(s.created_at)} · ${s.calls} calls · ${s.blocks} blocked`,
+        ),
+      ));
+      const url = s.agent_url;
+      const urlBox = el("pre", { class: "code-block", style: "user-select:all" }, url);
+      card.appendChild(urlBox);
+      const actions = el("div", { class: "flex" },
+        el("button", { class: "btn btn-small", onclick: () => copyToClipboard(url) }, "Copy URL"),
+        el("a", { class: "btn btn-secondary btn-small", href: `/session?id=${s.session_id}` }, "View audit"),
+        el("button", { class: "btn btn-secondary btn-small", onclick: async () => {
+          if (!confirm("End this session? The kernel and its variables will be discarded.")) return;
+          try { await api(`/api/sessions/${s.session_id}`, { method: "DELETE" }); await refreshSessions(); }
+          catch (e) { toast("Failed: " + e.message, true); }
+        } }, "End session"),
+      );
+      card.appendChild(actions);
+      sessionList.appendChild(card);
+    }
+  }
+})();
+</script>
+</body>
+</html>

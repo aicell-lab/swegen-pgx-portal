@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SweGen PGx Portal — public AI-agent analysis</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/portal.css">
+</head>
+<body>
+<header>
+  <h1><a href="/">SweGen PGx Portal</a> <span class="badge">PUBLIC TEST</span></h1>
+  <nav id="nav"><span class="muted" id="navStatus">Loading…</span></nav>
+</header>
+
+<main class="container">
+
+<section class="hero">
+  <h2>AI-agent-guided pharmacogenomic analysis of the Swedish population</h2>
+  <p>An open, governed access layer to the
+    <a href="https://doi.org/10.1038/ejhg.2017.130" target="_blank">SweGen</a>
+    pharmacogenomic pilot dataset — 20,179 variants across 12 chromosomes
+    with population allele frequencies in 1,000 Swedish individuals.
+    Connect your favourite AI agent and run aggregate analyses; a
+    Guardian agent reviews every query and every result against the data
+    owner's sensitivity contract.</p>
+</section>
+
+<div class="notice">
+  <strong>Read before you connect your agent</strong>
+  This is a public test of zero-trust data serving. Other approved users
+  share the same Jupyter kernel — namespace your variables. Do <b>not</b>
+  paste sensitive data into your agent prompts: anything you type may end
+  up in the audit log and may be visible to portal admins. Be aware that
+  prompt-injection content retrieved by your agent could cause it to
+  issue requests you did not intend. The Guardian is a defence-in-depth
+  layer, not a guarantee.
+</div>
+
+<div class="card">
+  <h3>How it works</h3>
+  <ol>
+    <li><b>Sign in with Hypha.</b> Use your existing Hypha account, or
+      register at <a href="https://hypha.aicell.io" target="_blank">hypha.aicell.io</a> first.</li>
+    <li><b>Request access.</b> Tell the portal admins who you are and what
+      you want to study. Adam Ameur (data owner) approves new users.</li>
+    <li><b>Start a session.</b> Once approved, click <em>New session</em>
+      on your dashboard. The portal gives you a unique service URL.</li>
+    <li><b>Paste the URL into your agent.</b> Any agent that can fetch
+      <code>SKILL.md</code> over HTTP and call <code>run_code</code> can
+      use the portal — Claude, Cursor, your own agent, etc. The Guardian
+      checks every code submission against the sensitivity contract; only
+      reviewed outputs are returned.</li>
+  </ol>
+</div>
+
+<div class="card">
+  <h3>The dataset</h3>
+  <p><b>SweGen pharmacogenomic pilot.</b> Pilot extract of
+    <a href="https://doi.org/10.1038/ejhg.2017.130" target="_blank">Ameur et al. (2017)</a>
+    restricted to pharmacogenomically relevant loci with alternate-allele
+    frequency ≥ 1%. <b>Aggregated allele frequencies only</b> — no
+    individual-level genotypes, no per-sample data, no PII.</p>
+  <table>
+    <tr><th>Variants</th><td>20,179</td></tr>
+    <tr><th>Chromosomes</th><td>chr1, chr2, chr4, chr6, chr7, chr8, chr10, chr12, chr13, chr16, chr18, chr19</td></tr>
+    <tr><th>Schema</th><td><code>chrom, pos, id (rsID), ref, alt, af</code></td></tr>
+    <tr><th>Reference build</th><td>GRCh38</td></tr>
+    <tr><th>Data owner</th><td>Adam Ameur, Uppsala University / SciLifeLab</td></tr>
+    <tr><th>Sensitivity contract</th><td>aggregate AF analyses allowed; data exfiltration, host probing and secret extraction blocked</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Suggested analyses</h3>
+  <p>The Safe Colab paper (Figure 3) demonstrates the kinds of analyses
+    this portal supports:</p>
+  <ul>
+    <li>Allele-frequency spectrum stratified by variant type (SNV / insertion / deletion)</li>
+    <li>Transition-to-transversion ratio per chromosome (expected ≈ 2.0)</li>
+    <li>Six-class substitution spectrum (C>A, C>G, C>T, T>A, T>C, T>G — C>T dominates)</li>
+    <li>Per-chromosome AF density</li>
+    <li>Pharmacogene-level grouping (join against ClinVar / PharmGKB / CPIC star alleles you load yourself)</li>
+  </ul>
+</div>
+
+<div id="cta" class="card" style="text-align:center">
+  <h3>Get started</h3>
+  <p id="ctaMsg" class="muted">Loading…</p>
+  <div id="ctaButtons"></div>
+</div>
+
+</main>
+
+<footer>
+  Hosted by SciLifeLab / KTH. Data &copy; Ameur et al. 2017. Source code:
+  <a href="https://github.com/safe-colab" target="_blank">safe-colab-cli</a>.
+  Admins: adam.ameur@igp.uu.se, joanna.hard@scilifelab.se, wei.ouyang@scilifelab.se.
+</footer>
+
+<script src="/static/portal.js"></script>
+<script>
+(async () => {
+  const { hyphaLogin, logout, getMe, el } = window.PortalAPI;
+
+  const navStatus = document.getElementById("navStatus");
+  const ctaMsg = document.getElementById("ctaMsg");
+  const ctaButtons = document.getElementById("ctaButtons");
+
+  const params = new URLSearchParams(location.search);
+  if (params.get("reason") === "session_expired") {
+    ctaMsg.innerHTML = "Your session expired — please sign in again.";
+  }
+
+  const me = await getMe();
+  if (!me) {
+    navStatus.innerHTML = '<button class="btn" id="loginBtn">Sign in with Hypha</button>';
+    if (!params.get("reason")) ctaMsg.textContent = "Sign in with your Hypha account to request access.";
+    ctaButtons.innerHTML = '<button class="btn" id="ctaLogin">Sign in with Hypha</button>';
+    const handler = async () => {
+      try { await hyphaLogin(); location.reload(); }
+      catch (e) { alert("Login failed: " + e.message); }
+    };
+    document.getElementById("loginBtn").onclick = handler;
+    document.getElementById("ctaLogin").onclick = handler;
+    return;
+  }
+
+  navStatus.innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/dashboard">Dashboard</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="logoutLink">Sign out</a>`;
+  document.getElementById("logoutLink").onclick = (ev) => { ev.preventDefault(); logout(); };
+
+  if (me.is_admin) {
+    ctaMsg.innerHTML = `Signed in as <b>${me.email}</b> (admin). Manage users and audit logs in the <a href="/admin">admin dashboard</a>.`;
+    ctaButtons.innerHTML = '<a class="btn" href="/admin">Open admin dashboard</a> &nbsp; <a class="btn btn-secondary" href="/dashboard">My sessions</a>';
+  } else if (me.status === "approved") {
+    ctaMsg.innerHTML = `Signed in as <b>${me.email}</b>. Your access is <span class="pill approved">approved</span>.`;
+    ctaButtons.innerHTML = '<a class="btn" href="/dashboard">Start a session</a>';
+  } else if (me.status === "pending") {
+    ctaMsg.innerHTML = `Signed in as <b>${me.email}</b>. Your request is <span class="pill pending">pending</span> admin approval.`;
+    ctaButtons.innerHTML = '<a class="btn btn-secondary" href="/dashboard">View your request</a>';
+  } else if (me.status === "rejected") {
+    ctaMsg.innerHTML = `Signed in as <b>${me.email}</b>. Your request was <span class="pill rejected">declined</span>. Contact the admins if you think this is in error.`;
+    ctaButtons.innerHTML = '';
+  } else {
+    ctaMsg.innerHTML = `Signed in as <b>${me.email}</b>. Complete the request form to ask for access.`;
+    ctaButtons.innerHTML = '<a class="btn" href="/dashboard">Request access</a>';
+  }
+})();
+</script>
+</body>
+</html>

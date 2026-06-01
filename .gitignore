@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+secrets.yaml
+
+# Local working directory (the portal writes here at runtime)
+work/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+
+# Claude / agent state
+.svamp/
+.claude/projects/

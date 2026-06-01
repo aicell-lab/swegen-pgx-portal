@@ -1,0 +1,40 @@
+[project]
+name = "swegen-pgx-portal"
+version = "0.2.0"
+description = "Public, AI-agent-guided pharmacogenomic analysis of the SweGen reference dataset via Safe Colab."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Wei Ouyang", email = "wei.ouyang@scilifelab.se" },
+  { name = "Adam Ameur", email = "adam.ameur@igp.uu.se" },
+  { name = "Joanna Hård", email = "joanna.hard@scilifelab.se" },
+]
+keywords = ["pharmacogenomics", "swegen", "safe-colab", "ai-agent", "hypha"]
+requires-python = ">=3.10"
+
+dependencies = [
+  "fastapi>=0.110,<1.0",
+  "uvicorn[standard]>=0.27,<1.0",
+  "pydantic>=2.5,<3.0",
+  "httpx>=0.27,<1.0",
+  "jupyter_client>=8.0",
+  "ipykernel>=6.29",
+  "hypha-rpc>=0.20.0",
+  "pandas>=2.0",
+  "numpy>=1.26",
+  "matplotlib>=3.8",
+  "seaborn>=0.13",
+  "scipy>=1.12",
+]
+
+[project.urls]
+Homepage = "https://swegen-pgx-portal.hypha.aicell.io"
+Repository = "https://github.com/aicell-lab/swegen-pgx-portal"
+Paper = "https://doi.org/10.1038/ejhg.2017.130"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["portal*"]

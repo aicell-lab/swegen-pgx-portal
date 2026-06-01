@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Session — SweGen PGx Portal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/portal.css">
+</head>
+<body>
+<header>
+  <h1><a href="/">SweGen PGx Portal</a></h1>
+  <nav id="nav"><span class="muted">Loading…</span></nav>
+</header>
+<main class="container">
+
+<a href="/dashboard">← back to dashboard</a>
+<h2 id="title" style="margin-top:14px">Session</h2>
+<p id="meta" class="muted"></p>
+
+<div class="card">
+  <h3>Agent URL</h3>
+  <p class="meta">Paste this into your AI agent. Anyone with this URL can
+    run code in this session — treat it like a password.</p>
+  <pre id="agentUrl" class="code-block" style="user-select:all"></pre>
+  <button class="btn btn-small" id="copyBtn">Copy</button>
+</div>
+
+<div class="card">
+  <h3>Audit trail</h3>
+  <p class="meta">Every <code>run_code</code> call, every Guardian decision
+    (independent POST from the Guardian agent), and every kernel result is
+    recorded here.</p>
+  <div class="flex-between">
+    <span class="muted" id="auditCount"></span>
+    <button class="btn btn-secondary btn-small" id="refreshBtn">Refresh</button>
+  </div>
+  <div id="auditList"></div>
+</div>
+
+</main>
+<footer>SweGen PGx Portal.</footer>
+
+<script src="/static/portal.js"></script>
+<script>
+(async () => {
+  const { api, getMe, logout, fmtTime, el, copyToClipboard } = window.PortalAPI;
+  const params = new URLSearchParams(location.search);
+  const sessionId = params.get("id");
+  if (!sessionId) { location.href = "/dashboard"; return; }
+
+  const me = await getMe();
+  if (!me) { location.href = "/"; return; }
+  document.getElementById("nav").innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> &nbsp; <a href="/dashboard">Dashboard</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="lo">Sign out</a>`;
+  document.getElementById("lo").onclick = (ev) => { ev.preventDefault(); logout(); };
+
+  async function refresh() {
+    const { session, audit } = await api(`/api/sessions/${sessionId}`);
+    document.getElementById("title").textContent = session.label || `session ${session.session_id.slice(0,8)}`;
+    document.getElementById("meta").innerHTML =
+      `Owner: <b>${session.user_email}</b> &nbsp;·&nbsp; ` +
+      `created ${fmtTime(session.created_at)} &nbsp;·&nbsp; ` +
+      `<span class="pill ${session.status === 'active' ? 'active' : 'ended'}">${session.status}</span> &nbsp;·&nbsp; ` +
+      `${session.calls} calls · ${session.blocks} blocked`;
+    if (session.agent_url) {
+      document.getElementById("agentUrl").textContent = session.agent_url;
+      document.getElementById("copyBtn").onclick = () => copyToClipboard(session.agent_url);
+    } else {
+      document.getElementById("agentUrl").textContent = "(only the session owner can see the URL)";
+      document.getElementById("copyBtn").disabled = true;
+    }
+
+    const list = document.getElementById("auditList");
+    list.innerHTML = "";
+    document.getElementById("auditCount").textContent = `${audit.length} events`;
+    if (audit.length === 0) {
+      list.appendChild(el("p", { class: "muted" }, "No activity yet."));
+      return;
+    }
+    for (const ev of audit) {
+      const klass = ev.decision === "blocked" || ev.type?.endsWith("blocked") ? "blocked"
+                  : ev.decision === "safe" ? "safe" : "";
+      const node = el("div", { class: "audit-event " + klass });
+      const head = el("div", {},
+        el("span", { class: "ts" }, fmtTime(ev.ts) + " · "),
+        el("b", {}, ev.type || ev.endpoint || "event"),
+        ev.decision ? el("span", { class: "pill " + (ev.decision === "blocked" ? "blocked" : ev.decision === "safe" ? "safe" : "error"), style: "margin-left:8px" }, ev.decision) : null,
+      );
+      node.appendChild(head);
+      const body = el("div", { class: "body" });
+      if (ev.summary) body.appendChild(el("div", {}, ev.summary));
+      if (ev.reason) body.appendChild(el("div", { class: "muted" }, ev.reason));
+      if (ev.code) {
+        const det = el("details", {}, el("summary", {}, "code"));
+        det.appendChild(el("pre", {}, ev.code));
+        body.appendChild(det);
+      }
+      if (typeof ev.duration_ms === "number") body.appendChild(el("div", { class: "muted" }, `executed in ${ev.duration_ms} ms`));
+      node.appendChild(body);
+      list.appendChild(node);
+    }
+  }
+
+  document.getElementById("refreshBtn").onclick = refresh;
+  await refresh();
+})();
+</script>
+</body>
+</html>

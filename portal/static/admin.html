@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Admin — SweGen PGx Portal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/portal.css">
+</head>
+<body>
+<header>
+  <h1><a href="/">SweGen PGx Portal</a> <span class="badge" style="background:#b91c1c">ADMIN</span></h1>
+  <nav id="nav"><span class="muted">Loading…</span></nav>
+</header>
+<main class="container">
+
+<section class="hero">
+  <h2>Admin dashboard</h2>
+  <p>Pending users, all sessions, full audit trails.</p>
+</section>
+
+<div id="errBanner" class="notice hidden"></div>
+
+<div class="stat-row" id="stats"></div>
+
+<div class="card">
+  <h3>Pending requests</h3>
+  <div id="pending"></div>
+</div>
+
+<div class="card">
+  <h3>All users</h3>
+  <div id="users"></div>
+</div>
+
+<div class="card">
+  <h3>All sessions</h3>
+  <p class="meta">Click a session row to open its full audit trail.</p>
+  <div id="sessions"></div>
+</div>
+
+<div id="auditModal" class="card hidden">
+  <div class="flex-between">
+    <h3 id="auditTitle">Audit trail</h3>
+    <button class="btn btn-secondary btn-small" id="closeAudit">Close</button>
+  </div>
+  <div id="auditList"></div>
+</div>
+
+</main>
+<footer>SweGen PGx Portal.</footer>
+
+<script src="/static/portal.js"></script>
+<script>
+(async () => {
+  const { api, getMe, logout, fmtTime, el } = window.PortalAPI;
+  const me = await getMe();
+  if (!me) { location.href = "/"; return; }
+  if (!me.is_admin) { location.href = "/dashboard"; return; }
+
+  document.getElementById("nav").innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> &nbsp; <a href="/dashboard">My sessions</a> &nbsp; <a href="#" id="lo">Sign out</a>`;
+  document.getElementById("lo").onclick = (ev) => { ev.preventDefault(); logout(); };
+
+  async function refresh() {
+    let stats, users, sessions;
+    try {
+      [stats, users, sessions] = await Promise.all([
+        api("/api/admin/stats"),
+        api("/api/admin/users"),
+        api("/api/admin/sessions"),
+      ]);
+    } catch (e) {
+      const banner = document.getElementById("errBanner");
+      banner.classList.remove("hidden");
+      banner.textContent = e.message;
+      return;
+    }
+
+    const statBlock = document.getElementById("stats");
+    statBlock.innerHTML = "";
+    const entries = [
+      ["Users (total)", stats.users_total],
+      ["Pending", stats.users_pending],
+      ["Approved", stats.users_approved],
+      ["Sessions", stats.sessions_total],
+      ["Audit events", stats.audit_events_total],
+      ["Blocks", stats.blocks_total],
+      ["Kernels live", (stats.kernels || {}).active_kernels ?? 0],
+    ];
+    for (const [label, num] of entries) {
+      statBlock.appendChild(el("div", { class: "stat" },
+        el("div", { class: "num" }, String(num)),
+        el("div", { class: "label" }, label),
+      ));
+    }
+
+    const pendingBox = document.getElementById("pending");
+    pendingBox.innerHTML = "";
+    const pending = users.users.filter(u => u.status === "pending");
+    if (pending.length === 0) {
+      pendingBox.appendChild(el("p", { class: "muted" }, "No pending requests."));
+    } else {
+      for (const u of pending) {
+        const row = el("div", { class: "card", style: "margin-top:10px;background:#fffbeb" });
+        row.appendChild(el("div", { class: "flex-between" },
+          el("div", {},
+            el("b", {}, u.email),
+            u.name ? el("span", {}, " · " + u.name) : null,
+            u.affiliation ? el("span", { class: "muted" }, " · " + u.affiliation) : null,
+            el("div", { class: "meta", style: "margin-top:4px" }, `requested ${fmtTime(u.registered_at)}`),
+            u.reason ? el("blockquote", { style: "margin:8px 0 0;padding:6px 10px;border-left:3px solid var(--accent);color:#555" }, u.reason) : null,
+          ),
+          el("div", { class: "flex" },
+            el("button", { class: "btn btn-small", onclick: () => act("approve", u.email) }, "Approve"),
+            el("button", { class: "btn btn-small btn-danger", onclick: () => act("reject", u.email) }, "Reject"),
+          ),
+        ));
+        pendingBox.appendChild(row);
+      }
+    }
+
+    const usersBox = document.getElementById("users");
+    usersBox.innerHTML = "";
+    const table = el("table");
+    table.appendChild(el("thead", {}, el("tr", {},
+      el("th", {}, "Email"),
+      el("th", {}, "Status"),
+      el("th", {}, "Registered"),
+      el("th", {}, "Last action"),
+      el("th", { class: "right" }, "Actions"),
+    )));
+    const tbody = el("tbody");
+    for (const u of users.users) {
+      const last = u.approved_at || u.rejected_at || u.updated_at || u.registered_at;
+      const tr = el("tr", {},
+        el("td", {}, u.email),
+        el("td", {}, el("span", { class: "pill " + u.status }, u.status)),
+        el("td", { class: "muted" }, fmtTime(u.registered_at)),
+        el("td", { class: "muted" }, fmtTime(last)),
+        el("td", { class: "right" }, el("div", { class: "flex", style: "justify-content:flex-end" },
+          u.status !== "approved" ? el("button", { class: "btn btn-small", onclick: () => act("approve", u.email) }, "Approve") : null,
+          u.status !== "rejected" ? el("button", { class: "btn btn-small btn-danger", onclick: () => act("reject", u.email) }, "Reject") : null,
+        )),
+      );
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    usersBox.appendChild(table);
+
+    const sessBox = document.getElementById("sessions");
+    sessBox.innerHTML = "";
+    if (sessions.sessions.length === 0) {
+      sessBox.appendChild(el("p", { class: "muted" }, "No sessions yet."));
+    } else {
+      const t = el("table");
+      t.appendChild(el("thead", {}, el("tr", {},
+        el("th", {}, "Session"),
+        el("th", {}, "User"),
+        el("th", {}, "Status"),
+        el("th", {}, "Created"),
+        el("th", {}, "Calls"),
+        el("th", {}, "Blocks"),
+        el("th", { class: "right" }, ""),
+      )));
+      const tb = el("tbody");
+      for (const s of sessions.sessions) {
+        const tr = el("tr", { onclick: () => showAudit(s.session_id) },
+          el("td", {}, s.label || s.session_id.slice(0, 8)),
+          el("td", {}, s.user_email),
+          el("td", {}, el("span", { class: "pill " + (s.status === "active" ? "active" : "ended") }, s.status)),
+          el("td", { class: "muted" }, fmtTime(s.created_at)),
+          el("td", {}, String(s.calls)),
+          el("td", {}, String(s.blocks)),
+          el("td", { class: "right" }, el("button", { class: "btn btn-small btn-secondary" }, "Audit")),
+        );
+        tr.style.cursor = "pointer";
+        tb.appendChild(tr);
+      }
+      t.appendChild(tb);
+      sessBox.appendChild(t);
+    }
+  }
+
+  async function act(action, email) {
+    try {
+      await api(`/api/admin/users/${action}`, { method: "POST", body: JSON.stringify({ email }) });
+      await refresh();
+    } catch (e) { alert(e.message); }
+  }
+
+  async function showAudit(sessionId) {
+    const modal = document.getElementById("auditModal");
+    modal.classList.remove("hidden");
+    document.getElementById("auditTitle").textContent = `Audit · ${sessionId.slice(0, 12)}`;
+    const list = document.getElementById("auditList");
+    list.innerHTML = '<p class="muted">Loading…</p>';
+    try {
+      const { audit, session } = await api(`/api/admin/sessions/${sessionId}/audit`);
+      list.innerHTML = "";
+      list.appendChild(el("p", { class: "meta" }, `Owner ${session.user_email} · ${session.calls} calls · ${session.blocks} blocked`));
+      if (audit.length === 0) {
+        list.appendChild(el("p", { class: "muted" }, "No events."));
+        return;
+      }
+      for (const ev of audit) {
+        const klass = ev.decision === "blocked" || (ev.type || "").endsWith("blocked") ? "blocked"
+                    : ev.decision === "safe" ? "safe" : "";
+        const node = el("div", { class: "audit-event " + klass });
+        node.appendChild(el("div", {},
+          el("span", { class: "ts" }, fmtTime(ev.ts) + " · "),
+          el("b", {}, ev.type || ev.endpoint || "event"),
+          ev.decision ? el("span", { class: "pill " + (ev.decision === "blocked" ? "blocked" : ev.decision === "safe" ? "safe" : "error"), style: "margin-left:8px" }, ev.decision) : null,
+          ev.user_email ? el("span", { class: "muted", style: "margin-left:8px" }, ev.user_email) : null,
+        ));
+        const body = el("div", { class: "body" });
+        if (ev.summary) body.appendChild(el("div", {}, ev.summary));
+        if (ev.reason) body.appendChild(el("div", { class: "muted" }, ev.reason));
+        if (ev.code) {
+          const d = el("details", {}, el("summary", {}, "code"));
+          d.appendChild(el("pre", {}, ev.code));
+          body.appendChild(d);
+        }
+        if (ev.code_output) {
+          const d = el("details", {}, el("summary", {}, "output"));
+          d.appendChild(el("pre", {}, ev.code_output));
+          body.appendChild(d);
+        }
+        if (typeof ev.duration_ms === "number") body.appendChild(el("div", { class: "muted" }, `executed in ${ev.duration_ms} ms`));
+        node.appendChild(body);
+        list.appendChild(node);
+      }
+    } catch (e) { list.innerHTML = `<p class="notice">${e.message}</p>`; }
+    modal.scrollIntoView({ behavior: "smooth" });
+  }
+
+  document.getElementById("closeAudit").onclick = () => document.getElementById("auditModal").classList.add("hidden");
+
+  await refresh();
+  setInterval(refresh, 30000);
+})();
+</script>
+</body>
+</html>

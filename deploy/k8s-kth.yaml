@@ -1,0 +1,194 @@
+---
+# SweGen PGx Portal — public Safe Colab service deployment for KTH/SciLifeLab K8s
+# (scilifelab-2-dev cluster, hypha namespace, alongside safe-colab-guardian).
+#
+# Apply with:
+#   kubectl --context scilifelab-2-dev apply -f deploy/k8s-kth.yaml
+#
+# Required secret 'swegen-pgx-portal-secrets' (created separately — do NOT
+# commit secrets to this manifest):
+#   source .env && kubectl --context scilifelab-2-dev -n hypha create secret generic \
+#     swegen-pgx-portal-secrets \
+#     --from-literal=HYPHA_TOKEN="$HYPHA_TOKEN" \
+#     --from-literal=GUARDIAN_TOKEN="$HYPHA_TOKEN" \
+#     --from-literal=RESEND_API_KEY="$RESEND_API_KEY" \
+#     --from-literal=AUDIT_HMAC_TOKEN="$(openssl rand -hex 32)" \
+#     --dry-run=client -o yaml | kubectl --context scilifelab-2-dev apply -f -
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: swegen-pgx-portal
+  namespace: hypha
+  labels:
+    app: swegen-pgx-portal
+spec:
+  # MUST be 1 — the portal hosts in-memory Jupyter kernels per session.
+  # Scaling out would split sessions across pods, breaking the URL-secret model.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: swegen-pgx-portal
+  template:
+    metadata:
+      labels:
+        app: swegen-pgx-portal
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - scilifelab-2-dev-worker-7kq5g-blq8c
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: portal
+          image: oeway/swegen-pgx-portal:0.2.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          env:
+            - name: HYPHA_SERVER_URL
+              value: "https://hypha.aicell.io"
+            - name: HYPHA_WORKSPACE
+              value: "safe-colab"
+            - name: HYPHA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: swegen-pgx-portal-secrets
+                  key: HYPHA_TOKEN
+            - name: GUARDIAN_URL
+              value: "http://safe-colab-guardian.hypha.svc.cluster.local"
+            - name: GUARDIAN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: swegen-pgx-portal-secrets
+                  key: GUARDIAN_TOKEN
+            - name: RESEND_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: swegen-pgx-portal-secrets
+                  key: RESEND_API_KEY
+            - name: AUDIT_HMAC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: swegen-pgx-portal-secrets
+                  key: AUDIT_HMAC_TOKEN
+            - name: PORTAL_BASE_URL
+              value: "https://swegen-pgx-portal.hypha.aicell.io"
+            - name: AUDIT_CALLBACK_URL
+              value: "http://swegen-pgx-portal.hypha.svc.cluster.local/audit/callback"
+            - name: PORTAL_DATA_DIR
+              value: "/data"
+            - name: PORTAL_WORK_DIR
+              value: "/work"
+            - name: ARTIFACT_ALIAS
+              value: "swegen-pgx-portal-state"
+            - name: ADMIN_EMAILS
+              value: "adam.ameur@igp.uu.se,joanna.hard@scilifelab.se,wei.ouyang@scilifelab.se"
+            # Session lifecycle. Kernels are reaped on whichever fires first:
+            # PORTAL_KERNEL_IDLE_SEC of inactivity, or PORTAL_KERNEL_MAX_LIFETIME_SEC
+            # of absolute age. The reaper sweep runs every PORTAL_REAPER_INTERVAL_SEC.
+            - name: PORTAL_MAX_KERNELS
+              value: "32"
+            - name: PORTAL_KERNEL_IDLE_SEC
+              value: "1800"            # 30 minutes
+            - name: PORTAL_KERNEL_MAX_LIFETIME_SEC
+              value: "86400"           # 24 hours
+            - name: PORTAL_REAPER_INTERVAL_SEC
+              value: "300"             # 5 minutes
+            - name: EMAIL_FROM
+              value: "SweGen PGx Portal <onboarding@resend.dev>"
+            # Until a real sender domain is verified at resend.com/domains,
+            # Resend test-mode only allows sending to the account-owner email.
+            # All admin notifications are routed here with the original
+            # recipients listed in the body.
+            - name: RESEND_VERIFIED_TO
+              value: "wei.ouyang@scilifelab.se"
+          volumeMounts:
+            - name: work
+              mountPath: /work
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+      volumes:
+        - name: work
+          emptyDir:
+            sizeLimit: 2Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: swegen-pgx-portal
+  namespace: hypha
+spec:
+  selector:
+    app: swegen-pgx-portal
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: swegen-pgx-portal
+  namespace: hypha
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - swegen-pgx-portal.hypha.aicell.io
+      secretName: swegen-pgx-portal.hypha.aicell.io-tls
+  rules:
+    - host: swegen-pgx-portal.hypha.aicell.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: swegen-pgx-portal
+                port:
+                  number: 80
