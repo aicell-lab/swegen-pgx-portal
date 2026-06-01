@@ -256,8 +256,9 @@
     } catch (e) { alert(e.message); }
   }
 
-  function previewReport(r) {
+  async function previewReport(r) {
     const modal = document.getElementById("previewModal");
+    const frame = document.getElementById("previewFrame");
     modal.classList.remove("hidden");
     document.getElementById("previewTitle").textContent = r.title;
     document.getElementById("previewMeta").innerHTML =
@@ -265,7 +266,26 @@
       `submitted ${fmtTime(r.submitted_at)} · ` +
       `<span class="pill ${r.status}">${r.status}</span> · ` +
       `${Math.round((r.html_size || 0) / 1024)} KB`;
-    document.getElementById("previewFrame").src = `/admin/reports/${r.report_id}/preview`;
+    // Fetch the HTML with the admin's Authorization header (a plain
+    // <iframe src> request can't carry the bearer token, since it lives
+    // in localStorage, not a cookie). srcdoc still combines with the
+    // iframe's sandbox attribute to give the content a null origin, so
+    // the security guarantee is unchanged.
+    frame.srcdoc = '<p style="font-family:sans-serif;padding:16px;color:#6b7280">Loading preview…</p>';
+    try {
+      const token = window.PortalAPI.getToken();
+      const resp = await fetch(`/admin/reports/${r.report_id}/preview`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) {
+        const detail = await resp.text();
+        frame.srcdoc = `<p style="font-family:sans-serif;padding:16px;color:#b91c1c">Preview failed: HTTP ${resp.status} — ${detail.slice(0, 200)}</p>`;
+      } else {
+        frame.srcdoc = await resp.text();
+      }
+    } catch (e) {
+      frame.srcdoc = `<p style="font-family:sans-serif;padding:16px;color:#b91c1c">Preview failed: ${e.message}</p>`;
+    }
     const actions = document.getElementById("previewActions");
     actions.innerHTML = "";
     if (r.status !== "approved") {
@@ -276,7 +296,8 @@
     }
     actions.appendChild(el("button", { class: "btn btn-secondary btn-small", onclick: () => {
       modal.classList.add("hidden");
-      document.getElementById("previewFrame").src = "about:blank";
+      frame.srcdoc = "";
+      frame.src = "about:blank";
     } }, "Close"));
     modal.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -289,8 +310,11 @@
         method: "POST",
         body: JSON.stringify({ report_id: r.report_id, note }),
       });
-      document.getElementById("previewModal").classList.add("hidden");
-      document.getElementById("previewFrame").src = "about:blank";
+      const modal = document.getElementById("previewModal");
+      const frame = document.getElementById("previewFrame");
+      modal.classList.add("hidden");
+      frame.srcdoc = "";
+      frame.src = "about:blank";
       await refresh();
     } catch (e) { alert(e.message); }
   }
@@ -343,6 +367,18 @@
   document.getElementById("closeAudit").onclick = () => document.getElementById("auditModal").classList.add("hidden");
 
   await refresh();
+
+  // If the URL is /admin?open=<report_id> (the link admins click in the
+  // submission email), open that report's preview right away.
+  const openId = new URLSearchParams(location.search).get("open");
+  if (openId) {
+    try {
+      const { reports: list } = await api("/api/admin/reports");
+      const target = list.find(r => r.report_id === openId);
+      if (target) await previewReport(target);
+    } catch (e) { /* best effort */ }
+  }
+
   setInterval(refresh, 30000);
 })();
 </script>

@@ -185,7 +185,11 @@ async def notify_admins_new_report(
     safe_name = author_name or author_email.split("@")[0]
     safe_desc = description or "(no description provided)"
     admin_url = f"{portal_base_url.rstrip('/')}/admin#reports"
-    preview_url = f"{portal_base_url.rstrip('/')}/admin/reports/{report_id}/preview"
+    # Land on the admin page with the preview modal pre-opened. Clicking
+    # the raw /admin/reports/<id>/preview endpoint from an email tab
+    # would 401 because the iframe-style request can't carry the
+    # bearer token from localStorage.
+    preview_url = f"{portal_base_url.rstrip('/')}/admin?open={report_id}"
     html = f"""\
 <div style="font-family:-apple-system,Inter,Arial,sans-serif;max-width:560px">
   <h2>New community-report submission</h2>
