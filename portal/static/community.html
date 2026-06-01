@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Community — SweGen PGx Portal</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/portal.css">
+<style>
+  .report-card { cursor: pointer; transition: transform 80ms; }
+  .report-card:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,0.08); }
+  .report-card h4 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
+  .report-card .tags span { display: inline-block; background: var(--code-bg); color: var(--muted); padding: 2px 8px; border-radius: 12px; margin-right: 4px; font-size: 11px; }
+  .viewer { background: white; border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); margin-top: 12px; }
+  .viewer iframe { width: 100%; height: 70vh; border: 0; border-radius: 0 0 8px 8px; background: white; }
+  .viewer .vbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .viewer .vbar h3 { margin: 0; font-size: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="/">SweGen PGx Portal</a></h1>
+  <nav id="nav"><a href="/community" style="font-weight:600">Community</a> &nbsp; <span id="userNav" class="muted"></span></nav>
+</header>
+<main class="container">
+
+<section class="hero">
+  <h2>Community reports</h2>
+  <p>Approved analyses and findings produced from the SweGen PGx Portal
+    by the analyst community. All reports were generated through
+    Guardian-checked, audited Safe Colab sessions, and reviewed by a
+    portal admin before publication.</p>
+</section>
+
+<div class="banner">
+  <b>Want to publish your own analysis?</b> Open a session from
+  <a href="/dashboard">your dashboard</a> and ask your AI agent to
+  <em>"share this report on the portal community"</em> — see the
+  <code>publish_report</code> endpoint in your session's SKILL.md.
+</div>
+
+<div id="reportList"></div>
+<div id="viewerHost"></div>
+
+</main>
+<footer>SweGen PGx Portal — community reports.</footer>
+
+<script src="/static/portal.js"></script>
+<script>
+(async () => {
+  const { api, getMe, logout, fmtTime, el } = window.PortalAPI;
+
+  const me = await getMe();
+  if (me) {
+    document.getElementById("userNav").innerHTML =
+      `&nbsp; <span class="muted">${me.email}</span> &nbsp; <a href="/dashboard">Dashboard</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="lo">Sign out</a>`;
+    document.getElementById("lo").onclick = (ev) => { ev.preventDefault(); logout(); };
+  } else {
+    document.getElementById("userNav").innerHTML =
+      `&nbsp; <a href="/">Sign in to publish</a>`;
+  }
+
+  const list = document.getElementById("reportList");
+  const viewerHost = document.getElementById("viewerHost");
+
+  let reports = [];
+  try {
+    reports = (await api("/api/community/reports")).reports;
+  } catch (e) {
+    list.appendChild(el("p", { class: "notice" }, "Failed to load reports: " + e.message));
+    return;
+  }
+
+  if (reports.length === 0) {
+    list.appendChild(el("div", { class: "card" },
+      el("p", { class: "muted" }, "No reports have been published yet. Yours could be the first — see the dashboard.")));
+    return;
+  }
+
+  function renderViewer(r) {
+    viewerHost.innerHTML = "";
+    const wrap = el("div", { class: "viewer", id: "report-" + r.report_id });
+    wrap.appendChild(el("div", { class: "vbar" },
+      el("div", {}, el("h3", {}, r.title), el("div", { class: "meta" },
+        `by ${r.author_name} · ${fmtTime(r.approved_at || r.submitted_at)}`,
+      )),
+      el("button", { class: "btn btn-secondary btn-small", onclick: () => { wrap.remove(); } }, "Close"),
+    ));
+    const iframe = el("iframe", {
+      src: `/community/reports/${r.report_id}/raw.html`,
+      sandbox: "allow-scripts",
+      referrerpolicy: "no-referrer",
+      loading: "lazy",
+    });
+    wrap.appendChild(iframe);
+    wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+    viewerHost.appendChild(wrap);
+  }
+
+  for (const r of reports) {
+    const card = el("div", { class: "card report-card", onclick: () => renderViewer(r) },
+      el("h4", {}, r.title),
+      el("div", { class: "meta" },
+        `by ${r.author_name} · ${fmtTime(r.approved_at || r.submitted_at)} · ${Math.round((r.html_size || 0)/1024)} KB`),
+      r.description ? el("p", {}, r.description) : null,
+      r.tags && r.tags.length
+        ? el("div", { class: "tags" }, r.tags.map(t => el("span", {}, "#" + t)))
+        : null,
+    );
+    list.appendChild(card);
+  }
+
+  // Open a specific report if URL has #report-<id>
+  const hash = location.hash.match(/^#report-([0-9a-f-]+)/);
+  if (hash) {
+    const target = reports.find(r => r.report_id === hash[1]);
+    if (target) renderViewer(target);
+  }
+})();
+</script>
+</body>
+</html>

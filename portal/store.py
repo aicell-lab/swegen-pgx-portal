@@ -63,6 +63,10 @@ class PortalStore:
         self._users: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
         self._audit: dict[str, list[dict]] = {}
+        # Reports keyed by report_id. Each value is the manifest (metadata
+        # only). The HTML body lives under reports/{report_id}/report.html
+        # and is fetched on demand by `get_report_html`.
+        self._reports: dict[str, dict] = {}
 
     async def init(self):
         """Connect to Hypha, ensure the artifact exists, hydrate caches."""
@@ -176,10 +180,31 @@ class PortalStore:
             events.sort(key=lambda e: e.get("ts", ""))
             self._audit[session_id] = events
 
+        # Reports — each report has its own subdirectory under reports/
+        # with a manifest.json + report.html.
+        for entry in await self._list("reports"):
+            if isinstance(entry, dict):
+                name = entry.get("name", "")
+                if entry.get("type") != "directory":
+                    continue
+            else:
+                name = str(entry).rstrip("/")
+            if not name:
+                continue
+            text = await self._get_text(f"reports/{name}/manifest.json")
+            if not text:
+                continue
+            try:
+                manifest = json.loads(text)
+                self._reports[manifest["report_id"]] = manifest
+            except Exception as e:
+                logger.warning(f"Failed to load report {name}: {e}")
+
         logger.info(
             f"Store hydrated: {len(self._users)} users, "
             f"{len(self._sessions)} sessions, "
-            f"{sum(len(v) for v in self._audit.values())} audit events"
+            f"{sum(len(v) for v in self._audit.values())} audit events, "
+            f"{len(self._reports)} reports"
         )
 
     async def upsert_user(self, email: str, **fields):
@@ -274,6 +299,107 @@ class PortalStore:
     def get_audit(self, session_id: str) -> list[dict]:
         return list(self._audit.get(session_id, []))
 
+    # ── Reports ─────────────────────────────────────────────────────────
+
+    async def create_report(
+        self,
+        *,
+        user_email: str,
+        session_id: str | None,
+        title: str,
+        description: str,
+        tags: list[str],
+        html: str,
+        author_name: str = "",
+    ) -> dict:
+        """Create a pending report. Stores manifest.json + report.html."""
+        async with self._lock:
+            report_id = uuid.uuid4().hex
+            now = _now_iso()
+            manifest = {
+                "report_id": report_id,
+                "user_email": user_email.lower(),
+                "author_name": author_name,
+                "session_id": session_id,
+                "title": title.strip()[:200],
+                "description": description.strip()[:2000],
+                "tags": [t.strip().lower()[:40] for t in (tags or []) if t.strip()][:12],
+                "status": "pending",
+                "submitted_at": now,
+                "updated_at": now,
+                "html_size": len(html.encode("utf-8")),
+            }
+            self._reports[report_id] = manifest
+            await self._stage_put(
+                f"reports/{report_id}/manifest.json",
+                json.dumps(manifest).encode(),
+            )
+            await self._stage_put(
+                f"reports/{report_id}/report.html",
+                html.encode("utf-8"),
+                content_type="text/html; charset=utf-8",
+            )
+            return manifest
+
+    async def update_report(self, report_id: str, **fields) -> dict | None:
+        async with self._lock:
+            manifest = self._reports.get(report_id)
+            if not manifest:
+                return None
+            manifest.update(fields)
+            manifest["updated_at"] = _now_iso()
+            await self._stage_put(
+                f"reports/{report_id}/manifest.json",
+                json.dumps(manifest).encode(),
+            )
+            return manifest
+
+    def get_report(self, report_id: str) -> dict | None:
+        return self._reports.get(report_id)
+
+    def list_reports(
+        self,
+        *,
+        status: str | None = None,
+        user_email: str | None = None,
+    ) -> list[dict]:
+        out = list(self._reports.values())
+        if status:
+            out = [r for r in out if r.get("status") == status]
+        if user_email:
+            email = user_email.lower()
+            out = [r for r in out if r.get("user_email") == email]
+        return sorted(out, key=lambda r: r.get("submitted_at", ""), reverse=True)
+
+    async def get_report_html(self, report_id: str) -> str | None:
+        if report_id not in self._reports:
+            return None
+        return await self._get_text(f"reports/{report_id}/report.html")
+
+    async def delete_report(self, report_id: str) -> bool:
+        """Hard-delete a report's files + drop from memory."""
+        async with self._lock:
+            if report_id not in self._reports:
+                return False
+            try:
+                await self._am.edit(artifact_id=self._artifact_id, stage=True)
+            except Exception:
+                pass
+            for path in (f"reports/{report_id}/manifest.json",
+                         f"reports/{report_id}/report.html"):
+                try:
+                    await self._am.remove_file(artifact_id=self._artifact_id, file_path=path)
+                except Exception as e:
+                    logger.warning(f"delete_report remove_file({path}) failed: {e}")
+            try:
+                await self._am.commit(artifact_id=self._artifact_id)
+            except Exception as e:
+                logger.warning(f"delete_report commit failed: {e}")
+            self._reports.pop(report_id, None)
+            return True
+
+    # ── Aggregate stats ─────────────────────────────────────────────────
+
     async def aggregate_stats(self) -> dict:
         """Return high-level stats for the admin dashboard."""
         total_calls = sum(len(events) for events in self._audit.values())
@@ -284,6 +410,7 @@ class PortalStore:
         )
         pending = [u for u in self._users.values() if u.get("status") == "pending"]
         approved = [u for u in self._users.values() if u.get("status") == "approved"]
+        reports = list(self._reports.values())
         return {
             "users_total": len(self._users),
             "users_pending": len(pending),
@@ -291,4 +418,8 @@ class PortalStore:
             "sessions_total": len(self._sessions),
             "audit_events_total": total_calls,
             "blocks_total": total_blocks,
+            "reports_total": len(reports),
+            "reports_pending": sum(1 for r in reports if r.get("status") == "pending"),
+            "reports_approved": sum(1 for r in reports if r.get("status") == "approved"),
+            "reports_rejected": sum(1 for r in reports if r.get("status") == "rejected"),
         }

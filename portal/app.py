@@ -49,7 +49,12 @@ from .auth import (
     require_admin,
     validate_token,
 )
-from .email_resend import notify_admins_new_signup, notify_user_approved
+from .email_resend import (
+    notify_admins_new_report,
+    notify_admins_new_signup,
+    notify_user_approved,
+    notify_user_report_decision,
+)
 from .guardian_client import PortalGuardian
 from .kernel_pool import KernelPool
 from .store import PortalStore
@@ -202,6 +207,23 @@ class RunCodeRequest(BaseModel):
     code: str
 
 
+# Cap inbound HTML to 5 MB. Larger reports should split into multiple
+# pages or strip embedded assets to data URIs of a saner size.
+MAX_REPORT_HTML_BYTES = 5 * 1024 * 1024
+
+
+class PublishReportRequest(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    html: str = Field(min_length=10)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+
+class ReportDecisionRequest(BaseModel):
+    report_id: str
+    note: str = ""
+
+
 class AuditCallbackPayload(BaseModel):
     endpoint: str
     ts: str | None = None
@@ -249,6 +271,14 @@ async def session_page():
     if p.is_file():
         return HTMLResponse(p.read_text())
     return HTMLResponse("<h1>Session</h1>")
+
+
+@app.get("/community", response_class=HTMLResponse)
+async def community_page():
+    p = STATIC_DIR / "community.html"
+    if p.is_file():
+        return HTMLResponse(p.read_text())
+    return HTMLResponse("<h1>Community</h1>")
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -567,6 +597,43 @@ curl -s -X POST "{agent_base}/run_code" \\
 
 Returns: `{{"stdout": "...", "stderr": "...", "result": "...", "error": null | {{"ename": "...", "evalue": "..."}}, "guardian": {{"is_safe": true, "reason": "..."}}}}`
 
+### `POST {agent_base}/publish_report`
+
+If the user says something like *"share this on the portal"* or *"publish
+this report to the community"*, submit it for admin review with this
+endpoint. The report becomes visible on the public **community** tab
+only after an admin approves it.
+
+Body: `{{"title": "...", "description": "...", "html": "<!DOCTYPE html>...", "tags": ["..."]}}`
+
+```bash
+curl -s -X POST "{agent_base}/publish_report" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"title":"AF spectrum of pharmacogenes in SweGen","description":"...", "html":"<!DOCTYPE html>...", "tags":["af-spectrum","pharmacogenomics"]}}'
+```
+
+Returns: `{{"report_id": "...", "status": "pending", "review_url": "..."}}`
+
+**Authoring guidelines for reports:**
+
+- Self-contained `<html>` document. Embed images as `data:image/png;base64,...`
+  URIs and inline CSS — your report is rendered inside a sandboxed iframe
+  with no network access of its own.
+- Aggregate results only. Anything you put in a report has already passed
+  the Guardian's output check (you generated it with `run_code`), but
+  the admin reviewing it is the final gate. Don't include speculative or
+  unrelated content.
+- Cap the HTML at ~5 MB. Strip raw kernel tracebacks and personal notes.
+- Plotly / Vega-Lite / Chart.js embedded as standalone `<script>` blocks
+  inside the HTML works well; matplotlib figures are best embedded as
+  `data:image/png;base64` URIs.
+
+### `GET {agent_base}/my_reports`
+
+List the reports the user has submitted from this session (their own
+only — other authors are not exposed). Useful so you can tell the user
+"your report is pending review" or "your previous report was approved".
+
 ## Suggested first steps
 
 ```python
@@ -721,6 +788,240 @@ async def agent_run_code(session_token: str, req: RunCodeRequest):
         "guardian": {"pre": pre, "post": post},
     }
     return response
+
+
+@app.post("/s/{session_token}/api/publish_report")
+async def agent_publish_report(session_token: str, req: PublishReportRequest):
+    """Submit an HTML report for admin review.
+
+    Per-call rule: report status starts at `pending`. It is not visible
+    on the community page until an admin approves. Admins are notified
+    by email; the user can poll status via `GET .../my_reports`.
+    """
+    sess = state.store.session_by_token(session_token)
+    if not sess:
+        raise HTTPException(404, "Unknown session token")
+    if sess.get("status") != "active":
+        raise HTTPException(410, "Session has ended")
+
+    html_bytes = req.html.encode("utf-8")
+    if len(html_bytes) > MAX_REPORT_HTML_BYTES:
+        raise HTTPException(
+            413,
+            f"Report HTML is {len(html_bytes)} bytes; the cap is {MAX_REPORT_HTML_BYTES}. "
+            "Trim it (compress base64 images, strip raw tracebacks, etc.) and resubmit.",
+        )
+
+    user = state.store.get_user(sess["user_email"]) or {}
+    report = await state.store.create_report(
+        user_email=sess["user_email"],
+        session_id=sess["session_id"],
+        title=req.title,
+        description=req.description,
+        tags=req.tags,
+        html=req.html,
+        author_name=user.get("name", "") or "",
+    )
+
+    await state.store.append_audit(sess["session_id"], {
+        "type": "report_submitted",
+        "report_id": report["report_id"],
+        "title": report["title"],
+        "html_size": report["html_size"],
+    })
+
+    if RESEND_API_KEY and ADMIN_EMAILS:
+        try:
+            await notify_admins_new_report(
+                api_key=RESEND_API_KEY,
+                admin_emails=ADMIN_EMAILS,
+                portal_base_url=PORTAL_BASE_URL,
+                report_id=report["report_id"],
+                title=report["title"],
+                author_email=sess["user_email"],
+                author_name=user.get("name", "") or "",
+                description=report["description"],
+            )
+        except Exception as e:
+            logger.warning(f"notify_admins_new_report failed: {e}")
+
+    return {
+        "report_id": report["report_id"],
+        "status": report["status"],
+        "review_url": f"{PORTAL_BASE_URL.rstrip('/')}/community#report-{report['report_id']}",
+        "message": "Your report is queued for admin review. You'll be emailed when a decision is made.",
+    }
+
+
+@app.get("/s/{session_token}/api/my_reports")
+async def agent_my_reports(session_token: str):
+    sess = state.store.session_by_token(session_token)
+    if not sess:
+        raise HTTPException(404, "Unknown session token")
+    reports = state.store.list_reports(user_email=sess["user_email"])
+    return {"reports": [_public_report_meta(r) for r in reports]}
+
+
+# ─── Community endpoints (public) ───
+
+
+def _public_report_meta(r: dict) -> dict:
+    return {
+        "report_id": r["report_id"],
+        "title": r.get("title", ""),
+        "description": r.get("description", ""),
+        "author_name": r.get("author_name", "") or r.get("user_email", "").split("@")[0],
+        "user_email": r.get("user_email", ""),
+        "tags": r.get("tags", []),
+        "status": r.get("status", "pending"),
+        "submitted_at": r.get("submitted_at"),
+        "approved_at": r.get("approved_at"),
+        "html_size": r.get("html_size", 0),
+    }
+
+
+@app.get("/api/community/reports")
+async def api_community_reports():
+    """List approved reports — anonymous, no auth required."""
+    reports = state.store.list_reports(status="approved")
+    # Hide raw user_email from the public listing; only show display name.
+    out = []
+    for r in reports:
+        meta = _public_report_meta(r)
+        meta.pop("user_email", None)
+        out.append(meta)
+    return {"reports": out}
+
+
+@app.get("/api/community/reports/{report_id}")
+async def api_community_report(report_id: str):
+    r = state.store.get_report(report_id)
+    if not r or r.get("status") != "approved":
+        raise HTTPException(404, "Report not found")
+    meta = _public_report_meta(r)
+    meta.pop("user_email", None)
+    meta["view_url"] = f"/community/reports/{report_id}/raw.html"
+    return meta
+
+
+@app.get("/community/reports/{report_id}/raw.html", response_class=HTMLResponse)
+async def community_report_raw(report_id: str):
+    """Stream an approved report's HTML body.
+
+    Served from this origin so the community page can embed it inside an
+    iframe; the iframe is sandboxed *without* `allow-same-origin`, so
+    any JavaScript in the report gets a null origin and cannot read this
+    site's cookies or localStorage. Setting a strict CSP also blocks
+    cross-origin network calls from the report.
+    """
+    r = state.store.get_report(report_id)
+    if not r or r.get("status") != "approved":
+        raise HTTPException(404, "Report not found")
+    html = await state.store.get_report_html(report_id)
+    if html is None:
+        raise HTTPException(404, "Report content missing")
+    headers = {
+        "Content-Security-Policy": (
+            "default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; "
+            "script-src 'unsafe-inline'; font-src data:;"
+        ),
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
+    return HTMLResponse(html, headers=headers)
+
+
+# ─── Admin report endpoints ───
+
+
+@app.get("/api/admin/reports")
+async def api_admin_reports(_admin: dict = Depends(require_admin)):
+    return {"reports": [_public_report_meta(r) for r in state.store.list_reports()]}
+
+
+@app.get("/admin/reports/{report_id}/preview", response_class=HTMLResponse)
+async def admin_preview_report(report_id: str, _admin: dict = Depends(require_admin)):
+    """Same as community raw view, but works for pending/rejected reports too."""
+    r = state.store.get_report(report_id)
+    if not r:
+        raise HTTPException(404, "Report not found")
+    html = await state.store.get_report_html(report_id)
+    if html is None:
+        raise HTTPException(404, "Report content missing")
+    headers = {
+        "Content-Security-Policy": (
+            "default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; "
+            "script-src 'unsafe-inline'; font-src data:;"
+        ),
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
+    return HTMLResponse(html, headers=headers)
+
+
+@app.post("/api/admin/reports/approve")
+async def api_admin_report_approve(req: ReportDecisionRequest, admin: dict = Depends(require_admin)):
+    r = state.store.get_report(req.report_id)
+    if not r:
+        raise HTTPException(404, "Report not found")
+    updated = await state.store.update_report(
+        req.report_id,
+        status="approved",
+        approved_at=datetime.now(timezone.utc).isoformat(),
+        approved_by=admin["email"],
+        reviewer_note=(req.note or "").strip()[:2000],
+    )
+    if RESEND_API_KEY:
+        try:
+            await notify_user_report_decision(
+                api_key=RESEND_API_KEY,
+                user_email=r["user_email"],
+                portal_base_url=PORTAL_BASE_URL,
+                title=r.get("title", ""),
+                report_id=req.report_id,
+                decision="approved",
+                reviewer_note=req.note or "",
+            )
+        except Exception as e:
+            logger.warning(f"notify_user_report_decision (approved) failed: {e}")
+    return {"report": _public_report_meta(updated)}
+
+
+@app.post("/api/admin/reports/reject")
+async def api_admin_report_reject(req: ReportDecisionRequest, admin: dict = Depends(require_admin)):
+    r = state.store.get_report(req.report_id)
+    if not r:
+        raise HTTPException(404, "Report not found")
+    updated = await state.store.update_report(
+        req.report_id,
+        status="rejected",
+        rejected_at=datetime.now(timezone.utc).isoformat(),
+        rejected_by=admin["email"],
+        reviewer_note=(req.note or "").strip()[:2000],
+    )
+    if RESEND_API_KEY:
+        try:
+            await notify_user_report_decision(
+                api_key=RESEND_API_KEY,
+                user_email=r["user_email"],
+                portal_base_url=PORTAL_BASE_URL,
+                title=r.get("title", ""),
+                report_id=req.report_id,
+                decision="rejected",
+                reviewer_note=req.note or "",
+            )
+        except Exception as e:
+            logger.warning(f"notify_user_report_decision (rejected) failed: {e}")
+    return {"report": _public_report_meta(updated)}
+
+
+@app.delete("/api/admin/reports/{report_id}")
+async def api_admin_report_delete(report_id: str, _admin: dict = Depends(require_admin)):
+    """Hard delete — only for rejected reports or rare cleanup."""
+    ok = await state.store.delete_report(report_id)
+    if not ok:
+        raise HTTPException(404, "Report not found")
+    return {"deleted": True}
 
 
 # ─── Guardian audit-callback endpoint ───

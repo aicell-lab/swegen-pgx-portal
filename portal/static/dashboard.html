@@ -55,6 +55,18 @@
   <div id="sessionList"></div>
 </div>
 
+<div id="myReportsCard" class="card hidden">
+  <div class="flex-between">
+    <h3 style="margin:0">Your community reports</h3>
+    <a class="btn btn-secondary btn-small" href="/community">Open community tab</a>
+  </div>
+  <p class="meta">To publish a report, ask your AI agent in an active
+    session — e.g. <em>"share this report on the portal community"</em>.
+    Your agent will POST it to <code>publish_report</code>; an admin
+    reviews before it goes live.</p>
+  <div id="myReportsList"></div>
+</div>
+
 <div id="responsibleCard" class="card hidden">
   <h3>Responsible use reminder</h3>
   <p>This kernel is shared with other approved users. <b>Do not paste
@@ -75,7 +87,7 @@
   const nav = document.getElementById("nav");
   const me = await getMe();
   if (!me) { location.href = "/"; return; }
-  nav.innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="logoutLink">Sign out</a>`;
+  nav.innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> &nbsp; <a href="/community">Community</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="logoutLink">Sign out</a>`;
   document.getElementById("logoutLink").onclick = (ev) => { ev.preventDefault(); logout(); };
 
   document.getElementById("userLine").innerHTML = `Signed in as <b>${me.email}</b>`;
@@ -92,8 +104,10 @@
   if (me.status === "approved") {
     statusText.innerHTML = '<span class="pill approved">approved</span> &nbsp; Welcome — you can create and use analysis sessions below.';
     sessionsCard.classList.remove("hidden");
+    document.getElementById("myReportsCard").classList.remove("hidden");
     responsibleCard.classList.remove("hidden");
     await refreshSessions();
+    await refreshMyReports();
   } else if (me.status === "pending") {
     statusText.innerHTML = '<span class="pill pending">pending</span> &nbsp; Your request is awaiting admin review. You will receive an email at <b>' + me.email + '</b> once a decision is made.';
     if (me.reason) statusText.innerHTML += `<br/><span class="muted">Reason you gave:</span> ${me.reason}`;
@@ -161,6 +175,43 @@
       );
       card.appendChild(actions);
       sessionList.appendChild(card);
+    }
+  }
+
+  async function refreshMyReports() {
+    const box = document.getElementById("myReportsList");
+    box.innerHTML = "";
+    // Combine reports from all of the user's sessions; the API exposes one
+    // per session, but the store actually returns *all* reports the user
+    // owns regardless of session. We hit the first session for simplicity.
+    let myReports = [];
+    try {
+      const { sessions } = await api("/api/sessions");
+      if (sessions.length > 0) {
+        const r = await fetch(`/s/${sessions[0].session_token}/api/my_reports`).then(x => x.json());
+        myReports = r.reports || [];
+      }
+    } catch (e) { /* ignore */ }
+    if (myReports.length === 0) {
+      box.appendChild(el("p", { class: "muted" }, "You haven't published any reports yet."));
+      return;
+    }
+    for (const r of myReports) {
+      const card = el("div", { class: "card", style: "margin-top:10px" },
+        el("div", { class: "flex-between" },
+          el("div", {},
+            el("b", {}, r.title),
+            " ",
+            el("span", { class: "pill " + (r.status === "approved" ? "approved" : r.status === "rejected" ? "rejected" : "pending") }, r.status),
+            el("div", { class: "meta", style: "margin-top:4px" }, `submitted ${fmtTime(r.submitted_at)} · ${Math.round((r.html_size||0)/1024)} KB`),
+            r.description ? el("p", { style: "margin:6px 0 0" }, r.description) : null,
+          ),
+          r.status === "approved"
+            ? el("a", { class: "btn btn-small", href: `/community#report-${r.report_id}` }, "View")
+            : el("span", { class: "muted", style: "font-size:12px" }, "awaiting admin review"),
+        ),
+      );
+      box.appendChild(card);
     }
   }
 })();

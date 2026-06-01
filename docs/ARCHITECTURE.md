@@ -163,6 +163,36 @@ const token = await rpc.login({
 — stored in `localStorage` as `portal_hypha_token`, sent as
 `Authorization: Bearer <token>` on every API call.
 
+## Community-report publishing
+
+Per-session agent endpoint `POST /s/<token>/api/publish_report` accepts
+`{title, description, html, tags}`. The portal:
+
+1. Validates the session is active and the HTML is ≤ 5 MB.
+2. Writes `reports/<report_id>/manifest.json` (metadata) and
+   `reports/<report_id>/report.html` (body) into the state artifact.
+3. Marks `status=pending`, appends a `report_submitted` audit event to
+   the session, and emails admins.
+
+Admin review (`/admin#reports`) uses `/admin/reports/<id>/preview`,
+which streams the raw HTML with a strict CSP into a sandboxed iframe.
+Approve / reject endpoints flip `status` and email the author. The
+public `/community` page lists approved reports (anonymous-friendly,
+no user emails) and renders each in `<iframe sandbox="allow-scripts">`
+pointing at `/community/reports/<id>/raw.html`.
+
+**Why this is reasonably safe:**
+
+- Report HTML can be hostile, but the iframe has a null origin (no
+  `allow-same-origin`), so the embedded JS cannot read this site's
+  cookies or `localStorage`.
+- The CSP on the report response blocks all network calls except
+  inline scripts/styles and `data:` images — so a report can't beacon
+  the visitor's IP to a third party.
+- Admin review is the publication gate. The same sandbox is used at
+  preview time, so what the admin sees is exactly what the public
+  will see.
+
 ## Why a single replica
 
 The pod holds all in-memory kernels (one per session) and the

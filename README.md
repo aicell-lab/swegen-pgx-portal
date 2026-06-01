@@ -23,6 +23,12 @@ admins.
 [hypha]: https://hypha.aicell.io
 [contract]: data/README.md
 
+The portal also exposes a **public Community tab** where approved users
+can publish HTML reports of their analyses for everyone to read. Reports
+go through admin review before they appear publicly; each one is
+rendered in a sandboxed iframe so embedded JavaScript can't reach the
+portal's auth state.
+
 ## The dataset
 
 | | |

@@ -113,7 +113,7 @@
 
   const me = await getMe();
   if (!me) {
-    navStatus.innerHTML = '<button class="btn" id="loginBtn">Sign in with Hypha</button>';
+    navStatus.innerHTML = '<a href="/community">Community</a> &nbsp; <button class="btn" id="loginBtn">Sign in with Hypha</button>';
     if (!params.get("reason")) ctaMsg.textContent = "Sign in with your Hypha account to request access.";
     ctaButtons.innerHTML = '<button class="btn" id="ctaLogin">Sign in with Hypha</button>';
     const handler = async () => {
@@ -125,7 +125,7 @@
     return;
   }
 
-  navStatus.innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/dashboard">Dashboard</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="logoutLink">Sign out</a>`;
+  navStatus.innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/community">Community</a> &nbsp; <a href="/dashboard">Dashboard</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="logoutLink">Sign out</a>`;
   document.getElementById("logoutLink").onclick = (ev) => { ev.preventDefault(); logout(); };
 
   if (me.is_admin) {

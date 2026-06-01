@@ -32,6 +32,14 @@
   <div id="users"></div>
 </div>
 
+<div class="card" id="reports">
+  <h3>Community-report reviews</h3>
+  <p class="meta">Reports submitted via <code>publish_report</code> from
+    user sessions. Click <b>Preview</b> to render in a sandboxed iframe
+    (the report's JS cannot access portal cookies).</p>
+  <div id="reportsList"></div>
+</div>
+
 <div class="card">
   <h3>All sessions</h3>
   <p class="meta">Click a session row to open its full audit trail.</p>
@@ -46,6 +54,16 @@
   <div id="auditList"></div>
 </div>
 
+<div id="previewModal" class="card hidden">
+  <div class="flex-between">
+    <h3 id="previewTitle">Report preview</h3>
+    <div class="flex" id="previewActions"></div>
+  </div>
+  <p class="meta" id="previewMeta"></p>
+  <iframe id="previewFrame" sandbox="allow-scripts" referrerpolicy="no-referrer"
+          style="width:100%;height:65vh;border:1px solid var(--border);border-radius:6px;background:white"></iframe>
+</div>
+
 </main>
 <footer>SweGen PGx Portal.</footer>
 
@@ -57,16 +75,17 @@
   if (!me) { location.href = "/"; return; }
   if (!me.is_admin) { location.href = "/dashboard"; return; }
 
-  document.getElementById("nav").innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> &nbsp; <a href="/dashboard">My sessions</a> &nbsp; <a href="#" id="lo">Sign out</a>`;
+  document.getElementById("nav").innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> &nbsp; <a href="/community">Community</a> &nbsp; <a href="/dashboard">My sessions</a> &nbsp; <a href="#" id="lo">Sign out</a>`;
   document.getElementById("lo").onclick = (ev) => { ev.preventDefault(); logout(); };
 
   async function refresh() {
-    let stats, users, sessions;
+    let stats, users, sessions, reports;
     try {
-      [stats, users, sessions] = await Promise.all([
+      [stats, users, sessions, reports] = await Promise.all([
         api("/api/admin/stats"),
         api("/api/admin/users"),
         api("/api/admin/sessions"),
+        api("/api/admin/reports"),
       ]);
     } catch (e) {
       const banner = document.getElementById("errBanner");
@@ -79,12 +98,15 @@
     statBlock.innerHTML = "";
     const entries = [
       ["Users (total)", stats.users_total],
-      ["Pending", stats.users_pending],
-      ["Approved", stats.users_approved],
+      ["Pending users", stats.users_pending],
+      ["Approved users", stats.users_approved],
       ["Sessions", stats.sessions_total],
       ["Audit events", stats.audit_events_total],
       ["Blocks", stats.blocks_total],
       ["Kernels live", (stats.kernels || {}).active_kernels ?? 0],
+      ["Reports total", stats.reports_total ?? 0],
+      ["Reports pending", stats.reports_pending ?? 0],
+      ["Reports approved", stats.reports_approved ?? 0],
     ];
     for (const [label, num] of entries) {
       statBlock.appendChild(el("div", { class: "stat" },
@@ -146,6 +168,53 @@
     table.appendChild(tbody);
     usersBox.appendChild(table);
 
+    // ── Reports section ───────────────────────────────────────────
+    const reportsBox = document.getElementById("reportsList");
+    reportsBox.innerHTML = "";
+    const allReports = (reports && reports.reports) || [];
+    const pendingReports = allReports.filter(r => r.status === "pending");
+    if (allReports.length === 0) {
+      reportsBox.appendChild(el("p", { class: "muted" }, "No community-report submissions yet."));
+    } else {
+      const t = el("table");
+      t.appendChild(el("thead", {}, el("tr", {},
+        el("th", {}, "Title"),
+        el("th", {}, "Author"),
+        el("th", {}, "Status"),
+        el("th", {}, "Submitted"),
+        el("th", {}, "Size"),
+        el("th", { class: "right" }, "Actions"),
+      )));
+      const tb = el("tbody");
+      const ordered = [
+        ...allReports.filter(r => r.status === "pending"),
+        ...allReports.filter(r => r.status === "approved"),
+        ...allReports.filter(r => r.status === "rejected"),
+      ];
+      for (const r of ordered) {
+        const tr = el("tr", {},
+          el("td", {}, r.title || r.report_id.slice(0, 8)),
+          el("td", {}, r.user_email || r.author_name || "?"),
+          el("td", {}, el("span", { class: "pill " + r.status }, r.status)),
+          el("td", { class: "muted" }, fmtTime(r.submitted_at)),
+          el("td", { class: "muted" }, Math.round((r.html_size || 0) / 1024) + " KB"),
+          el("td", { class: "right" }, el("div", { class: "flex", style: "justify-content:flex-end" },
+            el("button", { class: "btn btn-secondary btn-small", onclick: () => previewReport(r) }, "Preview"),
+            r.status !== "approved" ? el("button", { class: "btn btn-small", onclick: () => decideReport(r, "approve") }, "Approve") : null,
+            r.status !== "rejected" ? el("button", { class: "btn btn-small btn-danger", onclick: () => decideReport(r, "reject") }, "Reject") : null,
+          )),
+        );
+        tb.appendChild(tr);
+      }
+      t.appendChild(tb);
+      reportsBox.appendChild(t);
+      if (pendingReports.length > 0) {
+        const banner = el("p", { class: "notice", style: "margin-top:10px" },
+          `${pendingReports.length} report(s) awaiting review.`);
+        reportsBox.prepend(banner);
+      }
+    }
+
     const sessBox = document.getElementById("sessions");
     sessBox.innerHTML = "";
     if (sessions.sessions.length === 0) {
@@ -183,6 +252,45 @@
   async function act(action, email) {
     try {
       await api(`/api/admin/users/${action}`, { method: "POST", body: JSON.stringify({ email }) });
+      await refresh();
+    } catch (e) { alert(e.message); }
+  }
+
+  function previewReport(r) {
+    const modal = document.getElementById("previewModal");
+    modal.classList.remove("hidden");
+    document.getElementById("previewTitle").textContent = r.title;
+    document.getElementById("previewMeta").innerHTML =
+      `by <b>${r.user_email || r.author_name}</b> · ` +
+      `submitted ${fmtTime(r.submitted_at)} · ` +
+      `<span class="pill ${r.status}">${r.status}</span> · ` +
+      `${Math.round((r.html_size || 0) / 1024)} KB`;
+    document.getElementById("previewFrame").src = `/admin/reports/${r.report_id}/preview`;
+    const actions = document.getElementById("previewActions");
+    actions.innerHTML = "";
+    if (r.status !== "approved") {
+      actions.appendChild(el("button", { class: "btn btn-small", onclick: () => decideReport(r, "approve") }, "Approve"));
+    }
+    if (r.status !== "rejected") {
+      actions.appendChild(el("button", { class: "btn btn-small btn-danger", onclick: () => decideReport(r, "reject") }, "Reject"));
+    }
+    actions.appendChild(el("button", { class: "btn btn-secondary btn-small", onclick: () => {
+      modal.classList.add("hidden");
+      document.getElementById("previewFrame").src = "about:blank";
+    } }, "Close"));
+    modal.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function decideReport(r, decision) {
+    const note = prompt(`Optional note to the author (visible in the email):`, "");
+    if (note === null) return;
+    try {
+      await api(`/api/admin/reports/${decision}`, {
+        method: "POST",
+        body: JSON.stringify({ report_id: r.report_id, note }),
+      });
+      document.getElementById("previewModal").classList.add("hidden");
+      document.getElementById("previewFrame").src = "about:blank";
       await refresh();
     } catch (e) { alert(e.message); }
   }

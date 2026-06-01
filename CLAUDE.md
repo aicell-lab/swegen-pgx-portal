@@ -208,6 +208,54 @@ After that every notification goes straight to all three admins.
   `X-Audit-Token` header against `AUDIT_HMAC_TOKEN` (random per
   deployment).
 
+## Community reports
+
+Approved users can publish HTML reports to the public **Community**
+tab through their AI agent. Flow:
+
+1. Agent in a session calls `POST /s/<token>/api/publish_report` with
+   `{title, description, html, tags}`. HTML cap is `5 MB`.
+2. The portal stores the report in the state artifact under
+   `reports/<report_id>/` (`manifest.json` + `report.html`) with
+   `status=pending`.
+3. Admins get a Resend email with a Preview button (`/admin/reports/
+   <id>/preview` — renders the report inside an iframe with a strict
+   CSP and `sandbox="allow-scripts"` only).
+4. An admin approves or rejects from `/admin#reports`. On approve, the
+   author gets an email; the report becomes visible at `/community`.
+5. On reject, the author gets an email with the reviewer's note; the
+   report stays in the artifact in `status=rejected` (deletable from
+   the admin panel).
+
+**Safety stance:**
+- Reports may contain attacker-controlled HTML and JavaScript.
+- They are rendered exclusively inside `<iframe sandbox="allow-scripts">`
+  *without* `allow-same-origin`, so the iframe gets a null origin and
+  cannot read this site's cookies or localStorage.
+- A strict CSP on the raw-HTML response (`default-src 'none'; img-src data:;
+  script-src 'unsafe-inline'; style-src 'unsafe-inline' data:;
+  font-src data:;`) blocks cross-origin network calls and external
+  resource loads.
+- The admin is the final gate before public visibility — they preview
+  in the same sandbox the public sees.
+
+**API surface (admin):**
+- `GET  /api/admin/reports` — list all reports
+- `POST /api/admin/reports/approve` `{report_id, note}`
+- `POST /api/admin/reports/reject` `{report_id, note}`
+- `DELETE /api/admin/reports/{report_id}` — hard delete (rare cleanup)
+
+**API surface (public):**
+- `GET  /api/community/reports` — list of approved reports
+  (anonymous; user emails are stripped from this listing)
+- `GET  /api/community/reports/{report_id}` — single report metadata
+- `GET  /community/reports/{report_id}/raw.html` — the HTML body, only
+  if approved; served with the strict CSP
+
+**API surface (agent, per session):**
+- `POST /s/<token>/api/publish_report`
+- `GET  /s/<token>/api/my_reports` — author's own reports + status
+
 ## Session lifecycle
 
 The kernel pool reaps sessions automatically.

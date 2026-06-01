@@ -50,7 +50,7 @@
 
   const me = await getMe();
   if (!me) { location.href = "/"; return; }
-  document.getElementById("nav").innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> &nbsp; <a href="/dashboard">Dashboard</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="lo">Sign out</a>`;
+  document.getElementById("nav").innerHTML = `<span class="muted">${me.email}</span> &nbsp; <a href="/">Home</a> &nbsp; <a href="/community">Community</a> &nbsp; <a href="/dashboard">Dashboard</a> ${me.is_admin ? '&nbsp; <a href="/admin">Admin</a>' : ''} &nbsp; <a href="#" id="lo">Sign out</a>`;
   document.getElementById("lo").onclick = (ev) => { ev.preventDefault(); logout(); };
 
   async function refresh() {
