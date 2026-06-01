@@ -5,6 +5,44 @@
 <title>Dashboard — SweGen PGx Portal</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/portal.css">
+<style>
+  #myReportsList { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-top: 10px; }
+  .my-report-card {
+    position: relative;
+    background: white; border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 14px 12px 18px;
+    box-shadow: var(--shadow);
+    transition: transform 100ms, box-shadow 100ms, border-color 100ms;
+    display: flex; flex-direction: column; gap: 6px;
+    overflow: hidden;
+  }
+  .my-report-card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, var(--accent), #14b8a6);
+  }
+  .my-report-card.is-pending::before { background: linear-gradient(180deg, #fbbf24, #f59e0b); }
+  .my-report-card.is-rejected::before { background: linear-gradient(180deg, #f87171, #dc2626); }
+  .my-report-card:hover { border-color: var(--accent); box-shadow: 0 6px 18px rgba(15,118,110,0.10); }
+  .my-report-card .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .my-report-card h4 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.35; color: var(--text); }
+  .my-report-card .desc {
+    font-size: 13px; color: #4b5563; line-height: 1.5;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .my-report-card .footer {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--border);
+    font-size: 12px; color: var(--muted);
+  }
+  .my-report-card .footer a.cta { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .my-report-card .footer a.cta:hover { text-decoration: underline; }
+  .my-report-card .review-hint { font-size: 12px; color: var(--warn); font-style: italic; }
+  .my-report-card .declined-hint { font-size: 12px; color: var(--danger); }
+  .my-report-card .reviewer-note {
+    background: #f4f4f5; padding: 6px 10px; border-radius: 6px;
+    font-size: 12px; color: #374151; margin-top: 2px;
+  }
+</style>
 </head>
 <body>
 <header>
@@ -193,24 +231,39 @@
       }
     } catch (e) { /* ignore */ }
     if (myReports.length === 0) {
-      box.appendChild(el("p", { class: "muted" }, "You haven't published any reports yet."));
+      box.style.display = "block";
+      box.appendChild(el("p", { class: "muted" }, "You haven't published any reports yet. In an active session, ask your AI agent to share a report — e.g. ", el("em", {}, "\"publish this analysis to the SweGen PGx Portal community\""), "."));
       return;
     }
+    box.style.display = "";
     for (const r of myReports) {
-      const card = el("div", { class: "card", style: "margin-top:10px" },
-        el("div", { class: "flex-between" },
-          el("div", {},
-            el("b", {}, r.title),
-            " ",
-            el("span", { class: "pill " + (r.status === "approved" ? "approved" : r.status === "rejected" ? "rejected" : "pending") }, r.status),
-            el("div", { class: "meta", style: "margin-top:4px" }, `submitted ${fmtTime(r.submitted_at)} · ${Math.round((r.html_size||0)/1024)} KB`),
-            r.description ? el("p", { style: "margin:6px 0 0" }, r.description) : null,
-          ),
-          r.status === "approved"
-            ? el("a", { class: "btn btn-small", href: `/community#report-${r.report_id}` }, "View")
-            : el("span", { class: "muted", style: "font-size:12px" }, "awaiting admin review"),
-        ),
-      );
+      const klass =
+        r.status === "approved" ? "is-approved" :
+        r.status === "rejected" ? "is-rejected" : "is-pending";
+      const card = el("div", { class: "my-report-card " + klass });
+      card.appendChild(el("div", { class: "top" },
+        el("h4", {}, r.title),
+        el("span", { class: "pill " + (r.status === "approved" ? "approved" : r.status === "rejected" ? "rejected" : "pending") }, r.status),
+      ));
+      if (r.description) {
+        card.appendChild(el("div", { class: "desc" }, r.description));
+      }
+      if (r.reviewer_note) {
+        card.appendChild(el("div", { class: "reviewer-note" },
+          el("b", {}, "Reviewer note: "), r.reviewer_note));
+      }
+      const footer = el("div", { class: "footer" });
+      footer.appendChild(el("span", {},
+        `submitted ${fmtTime(r.submitted_at).slice(0, 10)} · ${Math.round((r.html_size||0)/1024)} KB`,
+      ));
+      if (r.status === "approved") {
+        footer.appendChild(el("a", { class: "cta", href: `/community#report-${r.report_id}` }, "View →"));
+      } else if (r.status === "pending") {
+        footer.appendChild(el("span", { class: "review-hint" }, "awaiting admin review"));
+      } else if (r.status === "rejected") {
+        footer.appendChild(el("span", { class: "declined-hint" }, "not published"));
+      }
+      card.appendChild(footer);
       box.appendChild(card);
     }
   }

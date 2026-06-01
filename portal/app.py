@@ -912,20 +912,22 @@ def _public_report_meta(r: dict) -> dict:
         "submitted_at": r.get("submitted_at"),
         "approved_at": r.get("approved_at"),
         "html_size": r.get("html_size", 0),
+        "reviewer_note": r.get("reviewer_note", ""),
     }
+
+
+def _strip_for_public(meta: dict) -> dict:
+    """Strip fields we don't want anonymous community visitors to see."""
+    meta.pop("user_email", None)
+    meta.pop("reviewer_note", None)
+    return meta
 
 
 @app.get("/api/community/reports")
 async def api_community_reports():
     """List approved reports — anonymous, no auth required."""
     reports = state.store.list_reports(status="approved")
-    # Hide raw user_email from the public listing; only show display name.
-    out = []
-    for r in reports:
-        meta = _public_report_meta(r)
-        meta.pop("user_email", None)
-        out.append(meta)
-    return {"reports": out}
+    return {"reports": [_strip_for_public(_public_report_meta(r)) for r in reports]}
 
 
 @app.get("/api/community/reports/{report_id}")
@@ -933,8 +935,7 @@ async def api_community_report(report_id: str):
     r = state.store.get_report(report_id)
     if not r or r.get("status") != "approved":
         raise HTTPException(404, "Report not found")
-    meta = _public_report_meta(r)
-    meta.pop("user_email", None)
+    meta = _strip_for_public(_public_report_meta(r))
     meta["view_url"] = f"/community/reports/{report_id}/raw.html"
     return meta
 
