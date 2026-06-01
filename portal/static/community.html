@@ -99,15 +99,29 @@
     return;
   }
 
+  function closeViewer() {
+    viewerHost.innerHTML = "";
+    list.classList.remove("hidden");
+    // also bring back the hero + signal banner if they were tucked away
+    document.querySelectorAll(".hero, .banner").forEach(n => n.classList.remove("hidden"));
+    history.replaceState(null, "", location.pathname);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   function renderViewer(r) {
     viewerHost.innerHTML = "";
+    // While a report is open, get the card grid + hero out of the way
+    // so the page is just the report and a back button. Restored on close.
+    list.classList.add("hidden");
+    document.querySelectorAll(".hero, .banner").forEach(n => n.classList.add("hidden"));
+
     const wrap = el("div", { class: "viewer", id: "report-" + r.report_id });
     wrap.appendChild(el("div", { class: "vbar" },
       el("div", {},
         el("h3", {}, r.title),
         el("div", { class: "meta" }, `by ${r.author_name} · published ${fmtTime(r.approved_at || r.submitted_at)} · ${Math.round((r.html_size||0)/1024)} KB`),
       ),
-      el("button", { class: "btn btn-secondary btn-small", onclick: () => { wrap.remove(); history.replaceState(null, "", location.pathname); } }, "Close"),
+      el("button", { class: "btn btn-secondary btn-small", onclick: closeViewer }, "← Back to all reports"),
     ));
     const iframe = el("iframe", {
       src: `/community/reports/${r.report_id}/raw.html`,
@@ -117,8 +131,8 @@
     });
     wrap.appendChild(iframe);
     history.replaceState(null, "", "#report-" + r.report_id);
-    wrap.scrollIntoView({ behavior: "smooth", block: "start" });
     viewerHost.appendChild(wrap);
+    wrap.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   for (const r of reports) {

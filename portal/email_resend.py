@@ -34,15 +34,51 @@ async def send_email(
     html: str,
     text: str | None = None,
     from_addr: str = DEFAULT_FROM,
+    *,
+    fanout_route: bool = True,
 ) -> bool:
+    """Send one email via Resend.
+
+    `fanout_route` controls Resend test-mode handling. With no verified
+    domain at Resend, the account is restricted to a single recipient
+    (RESEND_VERIFIED_TO).
+
+      - `fanout_route=True` (default): when any intended recipient
+        isn't the verified address, route the email to the verified
+        address and append a "Intended for: X, Y, Z" note to the body.
+        Right behaviour for *admin fanout* notifications, where the
+        verified address belongs to one of the admins and they can
+        forward to the others.
+
+      - `fanout_route=False`: when any intended recipient isn't the
+        verified address, *skip the send entirely* and log a warning.
+        Right behaviour for *per-user transactional* emails ("your
+        report was approved") where rerouting to the verified address
+        sends the wrong person a confusing message addressed to
+        someone else.
+
+    Once a real sender domain is verified at Resend and EMAIL_FROM is
+    pointed at it, RESEND_VERIFIED_TO can be unset and both branches
+    deliver normally to the actual recipients.
+    """
     if not api_key:
         logger.warning("RESEND_API_KEY not set — email skipped")
         return False
     intended = list(to) if not isinstance(to, str) else [to]
 
-    # Resend test-mode workaround: when no domain is verified, route to the
-    # account-owner address and announce the intended recipients in the body.
-    if VERIFIED_TO and any((r or "").lower() != VERIFIED_TO for r in intended):
+    needs_rerouting = bool(VERIFIED_TO) and any(
+        (r or "").lower() != VERIFIED_TO for r in intended
+    )
+
+    if needs_rerouting and not fanout_route:
+        logger.warning(
+            "Resend test-mode: skipping per-user email to %s "
+            "(verified address is %s — verify a sender domain at resend.com to enable delivery)",
+            intended, VERIFIED_TO,
+        )
+        return False
+
+    if needs_rerouting:
         recipients = [VERIFIED_TO]
         bcc_note = (
             "<hr/><p style='color:#777;font-size:12px'>"
@@ -168,6 +204,7 @@ async def notify_user_approved(
         to=user_email,
         subject=subject,
         html=html,
+        fanout_route=False,
     )
 
 
@@ -286,4 +323,5 @@ revised version through your AI agent at any time.</p>
         to=user_email,
         subject=subject,
         html=html,
+        fanout_route=False,
     )
