@@ -6,14 +6,36 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/portal.css">
 <style>
-  .report-card { cursor: pointer; transition: transform 80ms; }
-  .report-card:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0,0,0,0.08); }
-  .report-card h4 { margin: 0 0 6px; font-size: 16px; font-weight: 600; }
-  .report-card .tags span { display: inline-block; background: var(--code-bg); color: var(--muted); padding: 2px 8px; border-radius: 12px; margin-right: 4px; font-size: 11px; }
-  .viewer { background: white; border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); margin-top: 12px; }
-  .viewer iframe { width: 100%; height: 70vh; border: 0; border-radius: 0 0 8px 8px; background: white; }
-  .viewer .vbar { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
-  .viewer .vbar h3 { margin: 0; font-size: 16px; }
+  .report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }
+  .report-card {
+    position: relative; cursor: pointer;
+    background: white; border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 18px 16px 22px;
+    box-shadow: var(--shadow);
+    transition: transform 100ms, box-shadow 100ms, border-color 100ms;
+    display: flex; flex-direction: column; gap: 8px;
+    overflow: hidden;
+  }
+  .report-card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: linear-gradient(180deg, var(--accent), #14b8a6);
+  }
+  .report-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(15,118,110,0.12); border-color: var(--accent); }
+  .report-card .topline { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .report-card .topline .kind { color: var(--accent); font-weight: 600; }
+  .report-card h4 { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--text); }
+  .report-card .author { font-size: 13px; color: var(--muted); }
+  .report-card .author b { color: var(--text); font-weight: 600; }
+  .report-card .desc { font-size: 14px; color: #374151; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .report-card .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .report-card .tags span { display: inline-block; background: #f0fdfa; color: #0f766e; padding: 3px 9px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+  .report-card .footer { display: flex; justify-content: space-between; align-items: center; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+  .report-card .read-cta { color: var(--accent); font-weight: 600; }
+  .viewer { background: white; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); margin-top: 18px; }
+  .viewer iframe { width: 100%; height: 76vh; border: 0; border-radius: 0 0 10px 10px; background: white; }
+  .viewer .vbar { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .viewer .vbar h3 { margin: 0; font-size: 17px; font-weight: 600; }
+  .viewer .vbar .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -38,8 +60,8 @@
   <code>publish_report</code> endpoint in your session's SKILL.md.
 </div>
 
-<div id="reportList"></div>
 <div id="viewerHost"></div>
+<div id="reportList" class="report-grid"></div>
 
 </main>
 <footer>SweGen PGx Portal — community reports.</footer>
@@ -71,6 +93,7 @@
   }
 
   if (reports.length === 0) {
+    list.style.display = "block";
     list.appendChild(el("div", { class: "card" },
       el("p", { class: "muted" }, "No reports have been published yet. Yours could be the first — see the dashboard.")));
     return;
@@ -80,10 +103,11 @@
     viewerHost.innerHTML = "";
     const wrap = el("div", { class: "viewer", id: "report-" + r.report_id });
     wrap.appendChild(el("div", { class: "vbar" },
-      el("div", {}, el("h3", {}, r.title), el("div", { class: "meta" },
-        `by ${r.author_name} · ${fmtTime(r.approved_at || r.submitted_at)}`,
-      )),
-      el("button", { class: "btn btn-secondary btn-small", onclick: () => { wrap.remove(); } }, "Close"),
+      el("div", {},
+        el("h3", {}, r.title),
+        el("div", { class: "meta" }, `by ${r.author_name} · published ${fmtTime(r.approved_at || r.submitted_at)} · ${Math.round((r.html_size||0)/1024)} KB`),
+      ),
+      el("button", { class: "btn btn-secondary btn-small", onclick: () => { wrap.remove(); history.replaceState(null, "", location.pathname); } }, "Close"),
     ));
     const iframe = el("iframe", {
       src: `/community/reports/${r.report_id}/raw.html`,
@@ -92,19 +116,27 @@
       loading: "lazy",
     });
     wrap.appendChild(iframe);
+    history.replaceState(null, "", "#report-" + r.report_id);
     wrap.scrollIntoView({ behavior: "smooth", block: "start" });
     viewerHost.appendChild(wrap);
   }
 
   for (const r of reports) {
-    const card = el("div", { class: "card report-card", onclick: () => renderViewer(r) },
+    const card = el("div", { class: "report-card", onclick: () => renderViewer(r) },
+      el("div", { class: "topline" },
+        el("span", { class: "kind" }, "REPORT"),
+        el("span", {}, fmtTime(r.approved_at || r.submitted_at).slice(0, 10)),
+      ),
       el("h4", {}, r.title),
-      el("div", { class: "meta" },
-        `by ${r.author_name} · ${fmtTime(r.approved_at || r.submitted_at)} · ${Math.round((r.html_size || 0)/1024)} KB`),
-      r.description ? el("p", {}, r.description) : null,
+      el("div", { class: "author" }, "by ", el("b", {}, r.author_name)),
+      r.description ? el("div", { class: "desc" }, r.description) : null,
       r.tags && r.tags.length
         ? el("div", { class: "tags" }, r.tags.map(t => el("span", {}, "#" + t)))
         : null,
+      el("div", { class: "footer" },
+        el("span", {}, Math.round((r.html_size||0)/1024) + " KB"),
+        el("span", { class: "read-cta" }, "Read report →"),
+      ),
     );
     list.appendChild(card);
   }

@@ -212,6 +212,41 @@ class RunCodeRequest(BaseModel):
 MAX_REPORT_HTML_BYTES = 5 * 1024 * 1024
 
 
+def _report_security_headers() -> dict[str, str]:
+    """Headers for both community and admin report HTML responses.
+
+    The iframe that renders these has `sandbox="allow-scripts"` *without*
+    `allow-same-origin`, so the iframe always gets a null origin — even
+    if a report's JS were hostile, it cannot read this site's cookies
+    or localStorage. The CSP here is therefore tuned for what research
+    reports actually need (CDN libraries like Plotly, Chart.js, Vega,
+    D3; remote topojson/JSON; HTTPS images) rather than maximum
+    restriction. Hard limits stay in place:
+      - HTTP (insecure) is blocked.
+      - `frame-src 'none'` blocks nested iframes inside the report.
+      - `form-action 'none'` blocks any form POSTs.
+      - `base-uri 'none'` blocks `<base>` redirection tricks.
+    """
+    csp = (
+        "default-src 'self' https: data: blob:; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; "
+        "style-src 'self' 'unsafe-inline' https: data:; "
+        "img-src 'self' https: data: blob:; "
+        "font-src 'self' https: data:; "
+        "connect-src 'self' https: data: blob:; "
+        "media-src 'self' https: data: blob:; "
+        "frame-src 'none'; "
+        "object-src 'none'; "
+        "form-action 'none'; "
+        "base-uri 'none';"
+    )
+    return {
+        "Content-Security-Policy": csp,
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
+
+
 class PublishReportRequest(BaseModel):
     title: str = Field(min_length=3, max_length=200)
     description: str = Field(default="", max_length=2000)
@@ -920,15 +955,7 @@ async def community_report_raw(report_id: str):
     html = await state.store.get_report_html(report_id)
     if html is None:
         raise HTTPException(404, "Report content missing")
-    headers = {
-        "Content-Security-Policy": (
-            "default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; "
-            "script-src 'unsafe-inline'; font-src data:;"
-        ),
-        "X-Content-Type-Options": "nosniff",
-        "Referrer-Policy": "no-referrer",
-    }
-    return HTMLResponse(html, headers=headers)
+    return HTMLResponse(html, headers=_report_security_headers())
 
 
 # ─── Admin report endpoints ───
@@ -948,15 +975,7 @@ async def admin_preview_report(report_id: str, _admin: dict = Depends(require_ad
     html = await state.store.get_report_html(report_id)
     if html is None:
         raise HTTPException(404, "Report content missing")
-    headers = {
-        "Content-Security-Policy": (
-            "default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; "
-            "script-src 'unsafe-inline'; font-src data:;"
-        ),
-        "X-Content-Type-Options": "nosniff",
-        "Referrer-Policy": "no-referrer",
-    }
-    return HTMLResponse(html, headers=headers)
+    return HTMLResponse(html, headers=_report_security_headers())
 
 
 @app.post("/api/admin/reports/approve")
