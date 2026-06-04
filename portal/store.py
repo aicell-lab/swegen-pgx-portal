@@ -398,6 +398,67 @@ class PortalStore:
             self._reports.pop(report_id, None)
             return True
 
+    # ── LLM token accounting ───────────────────────────────────────────
+
+    def tokens_per_user(self) -> dict[str, dict]:
+        """Sum Guardian LLM tokens per user across all their sessions.
+
+        Reads the `usage` block that the Guardian POSTs on each audit
+        callback. Events without a usage block (older sessions before
+        token tracking shipped) contribute 0.
+        """
+        by_email: dict[str, dict] = {}
+        for session_id, events in self._audit.items():
+            sess = self._sessions.get(session_id) or {}
+            email = (sess.get("user_email") or "?").lower()
+            slot = by_email.setdefault(email, {
+                "user_email": email,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "guardian_calls": 0,
+                "sessions": 0,
+                "last_call_at": None,
+            })
+            for ev in events:
+                u = ev.get("usage") or {}
+                if not u:
+                    continue
+                if not (ev.get("type") or "").startswith("guardian_"):
+                    continue
+                slot["prompt_tokens"] += int(u.get("prompt_tokens") or 0)
+                slot["completion_tokens"] += int(u.get("completion_tokens") or 0)
+                slot["total_tokens"] += int(u.get("total_tokens") or 0)
+                slot["guardian_calls"] += 1
+                ts = ev.get("ts") or ev.get("ts_guardian")
+                if ts and (slot["last_call_at"] is None or ts > slot["last_call_at"]):
+                    slot["last_call_at"] = ts
+        # Sessions-per-user count (independent of audit events)
+        per_user_sessions: dict[str, int] = {}
+        for sess in self._sessions.values():
+            e = (sess.get("user_email") or "?").lower()
+            per_user_sessions[e] = per_user_sessions.get(e, 0) + 1
+        for email, n in per_user_sessions.items():
+            by_email.setdefault(email, {
+                "user_email": email,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "guardian_calls": 0,
+                "sessions": 0,
+                "last_call_at": None,
+            })["sessions"] = n
+        return by_email
+
+    def tokens_total(self) -> dict:
+        out = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "guardian_calls": 0}
+        for u in self.tokens_per_user().values():
+            out["prompt_tokens"] += u["prompt_tokens"]
+            out["completion_tokens"] += u["completion_tokens"]
+            out["total_tokens"] += u["total_tokens"]
+            out["guardian_calls"] += u["guardian_calls"]
+        return out
+
     # ── Aggregate stats ─────────────────────────────────────────────────
 
     async def aggregate_stats(self) -> dict:
@@ -411,6 +472,7 @@ class PortalStore:
         pending = [u for u in self._users.values() if u.get("status") == "pending"]
         approved = [u for u in self._users.values() if u.get("status") == "approved"]
         reports = list(self._reports.values())
+        tokens = self.tokens_total()
         return {
             "users_total": len(self._users),
             "users_pending": len(pending),
@@ -422,4 +484,8 @@ class PortalStore:
             "reports_pending": sum(1 for r in reports if r.get("status") == "pending"),
             "reports_approved": sum(1 for r in reports if r.get("status") == "approved"),
             "reports_rejected": sum(1 for r in reports if r.get("status") == "rejected"),
+            "tokens_total": tokens["total_tokens"],
+            "tokens_prompt": tokens["prompt_tokens"],
+            "tokens_completion": tokens["completion_tokens"],
+            "guardian_calls": tokens["guardian_calls"],
         }

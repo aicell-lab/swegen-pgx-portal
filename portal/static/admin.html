@@ -96,6 +96,12 @@
 
     const statBlock = document.getElementById("stats");
     statBlock.innerHTML = "";
+    const fmtTokens = (n) => {
+      n = Number(n || 0);
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+      return String(n);
+    };
     const entries = [
       ["Users (total)", stats.users_total],
       ["Pending users", stats.users_pending],
@@ -106,7 +112,10 @@
       ["Kernels live", (stats.kernels || {}).active_kernels ?? 0],
       ["Reports total", stats.reports_total ?? 0],
       ["Reports pending", stats.reports_pending ?? 0],
-      ["Reports approved", stats.reports_approved ?? 0],
+      ["Guardian calls", fmtTokens(stats.guardian_calls)],
+      ["Tokens · total", fmtTokens(stats.tokens_total)],
+      ["Tokens · prompt", fmtTokens(stats.tokens_prompt)],
+      ["Tokens · completion", fmtTokens(stats.tokens_completion)],
     ];
     for (const [label, num] of entries) {
       statBlock.appendChild(el("div", { class: "stat" },
@@ -146,17 +155,24 @@
     table.appendChild(el("thead", {}, el("tr", {},
       el("th", {}, "Email"),
       el("th", {}, "Status"),
-      el("th", {}, "Registered"),
-      el("th", {}, "Last action"),
+      el("th", {}, "Sessions"),
+      el("th", { title: "Guardian pre+post checks" }, "Guardian calls"),
+      el("th", { title: "Prompt + completion tokens summed across reflection rounds" }, "Tokens"),
+      el("th", {}, "Last activity"),
       el("th", { class: "right" }, "Actions"),
     )));
     const tbody = el("tbody");
-    for (const u of users.users) {
-      const last = u.approved_at || u.rejected_at || u.updated_at || u.registered_at;
+    // Sort by total tokens consumed, descending, so heavy users surface
+    const sortedUsers = [...users.users].sort((a, b) => (b.tokens_total || 0) - (a.tokens_total || 0));
+    for (const u of sortedUsers) {
+      const last = u.last_call_at || u.approved_at || u.rejected_at || u.updated_at || u.registered_at;
       const tr = el("tr", {},
         el("td", {}, u.email),
         el("td", {}, el("span", { class: "pill " + u.status }, u.status)),
-        el("td", { class: "muted" }, fmtTime(u.registered_at)),
+        el("td", {}, String(u.sessions_count || 0)),
+        el("td", {}, String(u.guardian_calls || 0)),
+        el("td", { title: `prompt ${u.tokens_prompt||0} + completion ${u.tokens_completion||0}` },
+          fmtTokens(u.tokens_total || 0)),
         el("td", { class: "muted" }, fmtTime(last)),
         el("td", { class: "right" }, el("div", { class: "flex", style: "justify-content:flex-end" },
           u.status !== "approved" ? el("button", { class: "btn btn-small", onclick: () => act("approve", u.email) }, "Approve") : null,

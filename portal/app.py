@@ -259,6 +259,14 @@ class ReportDecisionRequest(BaseModel):
     note: str = ""
 
 
+class TokenUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
+    rounds: int = 0
+
+
 class AuditCallbackPayload(BaseModel):
     endpoint: str
     ts: str | None = None
@@ -270,6 +278,7 @@ class AuditCallbackPayload(BaseModel):
     summary: str = ""
     reason: str = ""
     refusal: str | None = None
+    usage: TokenUsage | None = None
     metadata: dict = Field(default_factory=dict)
 
 
@@ -520,7 +529,34 @@ async def api_admin_stats(_admin: dict = Depends(require_admin)):
 
 @app.get("/api/admin/users")
 async def api_admin_users(_admin: dict = Depends(require_admin)):
-    return {"users": state.store.list_users()}
+    # Join Guardian token totals onto the user list so the dashboard can
+    # show a per-user "tokens used" column without a second round-trip.
+    tokens = state.store.tokens_per_user()
+    out = []
+    for u in state.store.list_users():
+        email = (u.get("email") or "").lower()
+        t = tokens.get(email)
+        out.append({
+            **u,
+            "tokens_total": (t or {}).get("total_tokens", 0),
+            "tokens_prompt": (t or {}).get("prompt_tokens", 0),
+            "tokens_completion": (t or {}).get("completion_tokens", 0),
+            "guardian_calls": (t or {}).get("guardian_calls", 0),
+            "sessions_count": (t or {}).get("sessions", 0),
+            "last_call_at": (t or {}).get("last_call_at"),
+        })
+    return {"users": out}
+
+
+@app.get("/api/admin/tokens")
+async def api_admin_tokens(_admin: dict = Depends(require_admin)):
+    """Per-user Guardian-LLM token totals."""
+    per_user = list(state.store.tokens_per_user().values())
+    per_user.sort(key=lambda r: r["total_tokens"], reverse=True)
+    return {
+        "totals": state.store.tokens_total(),
+        "per_user": per_user,
+    }
 
 
 class AdminUserAction(BaseModel):
@@ -1065,6 +1101,7 @@ async def audit_callback(payload: AuditCallbackPayload, request: Request):
         "reason": payload.reason[:1000] if payload.reason else "",
         "refusal": payload.refusal,
         "user_email": payload.user_email,
+        "usage": payload.usage.model_dump() if payload.usage else None,
         "ts_guardian": payload.ts,
     })
     return {"ok": True}
