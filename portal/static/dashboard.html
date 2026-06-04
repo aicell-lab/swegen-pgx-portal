@@ -200,10 +200,34 @@
         ),
       ));
       const url = s.agent_url;
+
+      // What is this URL? — orient first-time users
+      card.appendChild(el("p", { class: "meta", style: "margin:8px 0 4px" },
+        "This URL is your session's ",
+        el("b", {}, "agent skill"),
+        " endpoint. Paste it into your AI agent (Claude, Cursor, your own…); the agent fetches it to learn how to call ",
+        el("code", {}, "run_code"),
+        " and ", el("code", {}, "publish_report"),
+        " for this session, under Guardian review.",
+      ));
+
       const urlBox = el("pre", { class: "code-block", style: "user-select:all" }, url);
       card.appendChild(urlBox);
+
+      // Copy-pasteable starter prompt — gives agent a known-good cold start
+      const promptText =
+        `Fetch ${url} (the SKILL.md for my SweGen PGx Portal session) and follow it. ` +
+        `As a first step, run the suggested sanity check, then summarise the dataset's ` +
+        `key properties (size, chromosomes, AF distribution). All under Guardian review.`;
+      card.appendChild(el("p", { class: "meta", style: "margin:10px 0 4px" },
+        "Or copy this starter prompt and paste it into your agent:",
+      ));
+      const promptBox = el("pre", { class: "code-block", style: "user-select:all;white-space:pre-wrap" }, promptText);
+      card.appendChild(promptBox);
+
       const actions = el("div", { class: "flex" },
         el("button", { class: "btn btn-small", onclick: () => copyToClipboard(url) }, "Copy URL"),
+        el("button", { class: "btn btn-small btn-secondary", onclick: () => copyToClipboard(promptText) }, "Copy starter prompt"),
         el("a", { class: "btn btn-secondary btn-small", href: `/session?id=${s.session_id}` }, "View audit"),
         el("button", { class: "btn btn-secondary btn-small", onclick: async () => {
           if (!confirm("End this session? The kernel and its variables will be discarded.")) return;

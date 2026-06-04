@@ -89,6 +89,22 @@
   <div id="ctaButtons"></div>
 </div>
 
+<noscript>
+  <div class="card">
+    <h3>This page is JavaScript-rendered</h3>
+    <p>The sign-in flow needs a browser. If you are an AI agent or a CLI
+      client, you do not need this page — go straight to the API:</p>
+    <ul style="text-align:left">
+      <li><code>GET /api/config</code> — public config (admin emails, dataset metadata)</li>
+      <li><code>GET /api/community/reports</code> — list of approved community reports</li>
+      <li><code>POST /api/sessions</code> with <code>Authorization: Bearer &lt;HYPHA_TOKEN&gt;</code> — create a new analysis session and receive its <code>SKILL.md</code> URL. The token must belong to an approved user (request access through the browser dashboard first).</li>
+      <li><code>GET /s/&lt;session_token&gt;/SKILL.md</code> — the per-session agent-skill document, with the full <code>run_code</code> / <code>publish_report</code> reference.</li>
+    </ul>
+    <p>Source code and operator brief:
+      <a href="https://github.com/aicell-lab/swegen-pgx-portal">github.com/aicell-lab/swegen-pgx-portal</a>.</p>
+  </div>
+</noscript>
+
 </main>
 
 <footer>

@@ -96,6 +96,10 @@ All of the following are **SAFE** and the Guardian **must allow** them:
 
 - Reading the VCF and computing **any aggregate statistic** (counts, means,
   quantiles, histograms, density estimates, ratios, correlations).
+- **Bounded schema preview** — `df.head(n)`, `df.tail(n)`, `df.iloc[:n]`,
+  `df.sample(n)` where `n ≤ 10`. Small previews of this kind are a
+  standard schema-discovery step and are explicitly safe; they do not
+  constitute a row-by-row dump.
 - **AF-spectrum analyses** of any granularity, including bin counts.
 - **Ti/Tv** ratios, per-chromosome or pooled.
 - **Substitution spectrum** counts across the six pyrimidine-context

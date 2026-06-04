@@ -92,6 +92,28 @@ KERNEL_IDLE_TIMEOUT = int(os.environ.get("PORTAL_KERNEL_IDLE_SEC", str(30 * 60))
 KERNEL_MAX_LIFETIME = int(os.environ.get("PORTAL_KERNEL_MAX_LIFETIME_SEC", str(24 * 3600)))
 REAPER_INTERVAL = int(os.environ.get("PORTAL_REAPER_INTERVAL_SEC", str(5 * 60)))
 
+# Artifact export — agent-generated files in /work/ that the Guardian
+# approves are returned base64-encoded in the run_code response.
+MAX_ARTIFACT_FILES = int(os.environ.get("PORTAL_MAX_ARTIFACTS", "5"))
+MAX_ARTIFACT_BYTES = int(os.environ.get("PORTAL_MAX_ARTIFACT_BYTES", str(2 * 1024 * 1024)))
+ALLOWED_ARTIFACT_MIME = {
+    "image/png",
+    "image/svg+xml",
+    "image/jpeg",
+    "application/json",
+    "text/csv",
+    "text/plain",
+}
+_ARTIFACT_EXT_MIME = {
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".json": "application/json",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+}
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # ─── Lifecycle ───
@@ -642,17 +664,43 @@ Ameur et al., 2017).
 **Service URL (URL-as-secret — do not share):**
 `{agent_base}`
 
-You are authorised to run code in this session on behalf of your user.
-Code is executed in a persistent Jupyter kernel that **is shared with
-other approved users** of the portal. Variable state is therefore weakly
-isolated — namespace it with a prefix (e.g. `swegen_{session_short}_…`)
-if you store intermediate state.
+## Architecture — three actors, two trust boundaries
+
+This is the most important thing to understand before you run code:
+
+```
+   ┌─────────────────┐    POST run_code     ┌────────────────────────┐
+   │  YOU (agent     │ ───────────────────▶ │  Sandboxed kernel      │
+   │  client running │  POST publish_report │  /work/ and /data/     │
+   │  on your host)  │ ────────────────────▶│  → Guardian reviews    │
+   └─────────────────┘                      │     code in + out      │
+            ▲                               └────────────────────────┘
+            │ reviewed text + artifacts
+            ▼
+   ┌─────────────────┐                      ┌────────────────────────┐
+   │  Report HTML    │ ───── POST ─────────▶│  Portal admins         │
+   │  you assemble   │     publish_report   │  approve / reject for  │
+   │  on YOUR host   │                      │  the /community page   │
+   └─────────────────┘                      └────────────────────────┘
+```
+
+- **`run_code` runs inside the kernel.** The Guardian reviews every
+  line you submit (pre-execution) and every line of stdout/result
+  (post-execution).
+- **`publish_report` is called from your host, NOT from inside
+  `run_code`.** Do not try to `urllib.request.urlopen(...)` to the
+  portal from inside the kernel — the Guardian will block it as an
+  outbound network call. Assemble the report HTML on your side from
+  the aggregate outputs you already received from `run_code`, then
+  POST it.
+- **Portal admins** approve reports before they appear on the public
+  community page.
 
 ## Dataset documentation (authoritative)
 
 {data_readme}
 
-## Endpoint
+## Endpoints (called from your host with HTTPS POST/GET)
 
 ### `POST {agent_base}/run_code`
 
@@ -666,14 +714,41 @@ curl -s -X POST "{agent_base}/run_code" \\
   -d '{{"code": "import pandas as pd\\nprint(pd.read_csv(\\"/data/swegen_pgx_pilot.sites.pass_AF_0.01_filtered.vcf\\", sep=\\"\\\\t\\", header=None, nrows=5))"}}'
 ```
 
-Returns: `{{"stdout": "...", "stderr": "...", "result": "...", "error": null | {{"ename": "...", "evalue": "..."}}, "guardian": {{"is_safe": true, "reason": "..."}}}}`
+Returns:
+```json
+{{
+  "stdout": "...",
+  "stderr": "...",
+  "result": "...",
+  "error": null,
+  "guardian": {{"pre": {{...}}, "post": {{...}}}},
+  "artifacts": [
+    {{"name": "plot_af.png", "mime": "image/png", "size": 45821,
+     "sha256": "...", "bytes_b64": "iVBORw0KGgo..."}}
+  ]
+}}
+```
+
+**Artifacts.** Any new file your code writes under `/work/` is
+discovered after the post-output check and, if the Guardian
+approves it (one extra `ensure_output_secure` call per file with
+your code as the context), is returned to you base64-encoded in the
+`artifacts` field. Use this for matplotlib PNGs / SVGs and JSON/CSV
+summaries — you do not need to (and you will be blocked if you try
+to) base64-print files back through stdout yourself.
+
+Limits: at most {artifact_max_files} files per call, {artifact_max_kb} KB each, MIME ∈
+{{`image/png`, `image/svg+xml`, `image/jpeg`, `application/json`,
+`text/csv`, `text/plain`}}. Only files modified during this `run_code`
+call are eligible.
 
 ### `POST {agent_base}/publish_report`
 
-If the user says something like *"share this on the portal"* or *"publish
-this report to the community"*, submit it for admin review with this
-endpoint. The report becomes visible on the public **community** tab
-only after an admin approves it.
+**Called from your host, NOT from inside `run_code`.** When the user
+says "share this on the portal" / "publish this to the community,"
+assemble the HTML on your side from outputs you already received,
+then POST it here. The report enters admin review and only appears
+on the public community page after approval.
 
 Body: `{{"title": "...", "description": "...", "html": "<!DOCTYPE html>...", "tags": ["..."]}}`
 
@@ -687,23 +762,30 @@ Returns: `{{"report_id": "...", "status": "pending", "review_url": "..."}}`
 
 **Authoring guidelines for reports:**
 
-- Self-contained `<html>` document. Embed images as `data:image/png;base64,...`
-  URIs and inline CSS — your report is rendered inside a sandboxed iframe
-  with no network access of its own.
-- Aggregate results only. Anything you put in a report has already passed
-  the Guardian's output check (you generated it with `run_code`), but
-  the admin reviewing it is the final gate. Don't include speculative or
-  unrelated content.
+- Self-contained `<html>` document. Inline images as
+  `data:image/png;base64,...` URIs (e.g. the bytes you got back in
+  `run_code`'s `artifacts` field). The community viewer is a sandboxed
+  iframe.
+- Aggregate results only. Every value already passed the Guardian; the
+  admin is the final gate before public visibility. Don't include
+  speculative or unrelated content.
 - Cap the HTML at ~5 MB. Strip raw kernel tracebacks and personal notes.
-- Plotly / Vega-Lite / Chart.js embedded as standalone `<script>` blocks
-  inside the HTML works well; matplotlib figures are best embedded as
-  `data:image/png;base64` URIs.
+- Plotly / Vega-Lite / Chart.js loaded from a public CDN works (the
+  community CSP allows HTTPS scripts).
+
+**Distributing reports.** Submission via `publish_report` requests an
+endorsement by the SweGen PGx Portal admins. The approval step is
+about portal endorsement and discoverability, not visibility — the
+HTML is yours to share. If you do share a draft outside the portal
+(e.g. a preview URL you spin up on your own host), please be explicit
+with the recipient that it has not yet been reviewed by SweGen PGx
+Portal admins.
 
 ### `GET {agent_base}/my_reports`
 
-List the reports the user has submitted from this session (their own
-only — other authors are not exposed). Useful so you can tell the user
-"your report is pending review" or "your previous report was approved".
+List the reports submitted from this session — useful to tell the
+user "your report is pending review" or "your previous report was
+approved." Returns only your user's reports.
 
 ## Suggested first steps
 
@@ -714,6 +796,8 @@ df = pd.read_csv(
     sep="\\t", header=None,
     names=["chrom", "pos", "id", "ref", "alt", "af"],
 )
+# Bounded schema preview (≤10 rows) is explicitly allowed by the contract:
+print(df.head())
 print(df.shape, df["chrom"].nunique(), "chromosomes")
 print(df.describe())
 ```
@@ -721,6 +805,28 @@ print(df.describe())
 Then reproduce parts of Figure 3 of the Safe Colab paper: the AF spectrum
 by variant type, per-chromosome Ti/Tv ratio, the six-class substitution
 spectrum, and per-chromosome AF density.
+
+## Agent-native session creation
+
+Sessions are normally created by the human user from the dashboard,
+but a Hypha-authenticated agent can also create one programmatically.
+The session URL it gets back is the same URL-as-secret a human would
+have copied.
+
+```bash
+# Requires a Hypha JWT in the Authorization header — obtain one with
+# `hypha-rpc login` or a service-account token, or send the user
+# through the dashboard's "New session" button.
+curl -s -X POST "{portal_base}/api/sessions" \\
+  -H "Authorization: Bearer $HYPHA_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"label": "my analysis"}}'
+```
+
+Returns: `{{"session": {{"session_id": "...", "session_token": "...", "agent_url": "https://.../s/<token>/SKILL.md", ...}}}}`
+
+The returned `agent_url` is what you paste into the next agent
+invocation as the new session's `SKILL.md` endpoint.
 
 ## Responsible use
 
@@ -749,10 +855,143 @@ async def agent_skill_md(session_token: str):
     agent_base = f"{PORTAL_BASE_URL.rstrip('/')}/s/{session_token}/api"
     body = SKILL_MD_TEMPLATE.format(
         agent_base=agent_base,
+        portal_base=PORTAL_BASE_URL.rstrip("/"),
         data_readme=state.data_readme,
         session_short=_session_short(sess["session_id"]),
+        artifact_max_files=MAX_ARTIFACT_FILES,
+        artifact_max_kb=MAX_ARTIFACT_BYTES // 1024,
     )
     return PlainTextResponse(body, media_type="text/markdown")
+
+
+def _scan_artifacts(work_dir: str, since_ts: float) -> list[dict]:
+    """Find files in work_dir created or modified after `since_ts`.
+
+    Returns up to MAX_ARTIFACT_FILES candidates as
+    `{path, name, size, mime}` dicts. Caller is responsible for the
+    Guardian check and base64-encoding.
+    """
+    candidates: list[dict] = []
+    real_work = os.path.realpath(work_dir)
+    try:
+        entries = os.scandir(real_work)
+    except OSError:
+        return []
+    with entries:
+        for entry in entries:
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if st.st_mtime < since_ts - 0.5:
+                continue
+            if st.st_size <= 0 or st.st_size > MAX_ARTIFACT_BYTES:
+                continue
+            ext = os.path.splitext(entry.name)[1].lower()
+            mime = _ARTIFACT_EXT_MIME.get(ext)
+            if not mime or mime not in ALLOWED_ARTIFACT_MIME:
+                continue
+            candidates.append({
+                "path": entry.path,
+                "name": entry.name,
+                "size": st.st_size,
+                "mime": mime,
+                "mtime": st.st_mtime,
+            })
+    candidates.sort(key=lambda c: c["mtime"], reverse=True)
+    return candidates[:MAX_ARTIFACT_FILES]
+
+
+def _artifact_review_text(code: str, candidate: dict, preview: str) -> tuple[str, str]:
+    """Build the (code, code_output) pair the Guardian reviews for an artifact.
+
+    For text-ish formats we pass a real preview; for binary we pass a
+    stub so the Guardian decides on the basis of the originating code.
+    """
+    code_repr = code
+    if candidate["mime"].startswith("image/"):
+        output_repr = (
+            f"# Artifact produced by the run_code call above\n"
+            f"name: {candidate['name']}\n"
+            f"mime: {candidate['mime']}\n"
+            f"size: {candidate['size']} bytes\n"
+            f"(binary; content not shown — decide based on the code)\n"
+        )
+    else:
+        output_repr = (
+            f"# Artifact produced by the run_code call above\n"
+            f"name: {candidate['name']}\n"
+            f"mime: {candidate['mime']}\n"
+            f"size: {candidate['size']} bytes\n"
+            f"--- first {len(preview)} bytes ---\n{preview}\n"
+        )
+    return code_repr, output_repr
+
+
+async def _materialize_artifacts(
+    candidates: list[dict],
+    code: str,
+    session_id: str,
+    user_email: str,
+) -> list[dict]:
+    """Run a Guardian post-output check on each candidate; base64-encode the approved ones."""
+    import base64
+    import hashlib
+
+    out: list[dict] = []
+    for cand in candidates:
+        try:
+            with open(cand["path"], "rb") as fh:
+                raw = fh.read()
+        except OSError as e:
+            logger.warning("artifact read failed (%s): %s", cand["path"], e)
+            continue
+        if cand["mime"].startswith("image/"):
+            preview = ""
+        else:
+            try:
+                preview = raw[:10_000].decode("utf-8", errors="replace")
+            except Exception:
+                preview = ""
+        code_repr, output_repr = _artifact_review_text(code, cand, preview)
+        check = await state.guardian.check_output(
+            code_repr, output_repr, session_id=session_id, user_email=user_email,
+        )
+        is_safe = check.get("is_safe")
+        if "error" in check:
+            await state.store.append_audit(session_id, {
+                "type": "artifact_guardian_error",
+                "artifact_name": cand["name"],
+                "error": check["error"],
+            })
+            continue
+        if not is_safe:
+            await state.store.append_audit(session_id, {
+                "type": "artifact_blocked",
+                "artifact_name": cand["name"],
+                "mime": cand["mime"],
+                "size": cand["size"],
+                "reason": (check.get("reason") or "")[:500],
+            })
+            continue
+        sha256 = hashlib.sha256(raw).hexdigest()
+        out.append({
+            "name": cand["name"],
+            "mime": cand["mime"],
+            "size": cand["size"],
+            "sha256": sha256,
+            "bytes_b64": base64.b64encode(raw).decode("ascii"),
+        })
+        await state.store.append_audit(session_id, {
+            "type": "artifact_exported",
+            "artifact_name": cand["name"],
+            "mime": cand["mime"],
+            "size": cand["size"],
+            "sha256": sha256,
+        })
+    return out
 
 
 @app.post("/s/{session_token}/api/run_code")
@@ -798,6 +1037,7 @@ async def agent_run_code(session_token: str, req: RunCodeRequest):
 
     kernel = await state.pool.get(session_id)
     t0 = time.time()
+    t0_artifacts = t0  # everything modified after this is a candidate
     try:
         result = await kernel.execute(req.code, timeout=180)
     except Exception as e:
@@ -839,6 +1079,17 @@ async def agent_run_code(session_token: str, req: RunCodeRequest):
                     "guardian": post,
                 }, status_code=200)
 
+    artifacts: list[dict] = []
+    if result.get("error") is None:
+        try:
+            candidates = _scan_artifacts(WORK_DIR, t0_artifacts)
+            if candidates:
+                artifacts = await _materialize_artifacts(
+                    candidates, req.code, session_id, user_email,
+                )
+        except Exception as e:
+            logger.warning("artifact discovery failed: %s", e)
+
     await state.store.update_session(
         session_id,
         calls=sess.get("calls", 0) + 1,
@@ -849,6 +1100,7 @@ async def agent_run_code(session_token: str, req: RunCodeRequest):
         "stdout_chars": len(result.get("stdout", "")),
         "stderr_chars": len(result.get("stderr", "")),
         "has_error": result.get("error") is not None,
+        "artifacts_exported": len(artifacts),
     })
 
     response = {
@@ -857,6 +1109,7 @@ async def agent_run_code(session_token: str, req: RunCodeRequest):
         "result": result.get("result"),
         "error": result.get("error"),
         "guardian": {"pre": pre, "post": post},
+        "artifacts": artifacts,
     }
     return response
 
