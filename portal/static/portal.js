@@ -95,10 +95,21 @@ async function api(path, opts = {}) {
 }
 
 async function getMe() {
+  // Do NOT go through api() here — its 401 handler redirects to "/", which
+  // would bounce visitors off public pages (e.g. /community) just because
+  // they had an expired token in localStorage from an earlier visit.
   const token = getToken();
   if (!token) return null;
-  try { return await api("/api/me"); }
-  catch (e) { if (e.status === 401) return null; throw e; }
+  let r;
+  try {
+    r = await fetch("/api/me", {
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+    });
+  } catch (e) { return null; }
+  if (r.status === 401) { setToken(null); return null; }
+  if (!r.ok) return null;
+  try { return await r.json(); }
+  catch { return null; }
 }
 
 function fmtTime(iso) {
