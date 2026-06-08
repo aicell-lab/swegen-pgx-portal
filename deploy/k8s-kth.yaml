@@ -23,11 +23,24 @@ metadata:
   labels:
     app: swegen-pgx-portal
 spec:
-  # MUST be 1 — the portal hosts in-memory Jupyter kernels per session.
-  # Scaling out would split sessions across pods, breaking the URL-secret model.
+  # Steady-state must remain 1 — the portal hosts in-memory Jupyter
+  # kernels per session, and scaling out would split sessions across
+  # pods, breaking the URL-secret model. But during rollouts we use
+  # RollingUpdate (maxSurge=1, maxUnavailable=0): the new pod must be
+  # READY before the old one is torn down, so there is no 5xx window
+  # at the ingress. The brief ~10 s overlap is fine — sessions live
+  # in the Hypha artifact (so /api/sessions and /SKILL.md still
+  # resolve from either pod) and in-memory kernels are lazily
+  # respawned on the next run_code call on the new pod. Audit/state
+  # writes during the overlap use Hypha's staging+commit semantics
+  # (last-write-wins) which is acceptable.
   replicas: 1
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  minReadySeconds: 5
   selector:
     matchLabels:
       app: swegen-pgx-portal
