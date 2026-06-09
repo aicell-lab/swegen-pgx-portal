@@ -15,6 +15,35 @@ import httpx
 
 logger = logging.getLogger("portal.guardian_client")
 
+# Returned message when the Guardian's underlying LLM provider is out of
+# credit / rate-limited. We surface this distinctly from a normal
+# "your code violates the contract" error so the agent doesn't think
+# the user did something wrong.
+QUOTA_ERROR_MESSAGE = (
+    "The portal's Guardian service is temporarily unavailable because its "
+    "LLM provider quota is exhausted. Portal admins are aware. Please retry "
+    "in a few minutes, or contact wei.ouyang@scilifelab.se if it persists."
+)
+
+
+def _classify_guardian_error(text: str) -> str | None:
+    """If `text` looks like an OpenAI quota / billing / rate-limit error,
+    return the friendly QUOTA_ERROR_MESSAGE. Otherwise return None."""
+    if not text:
+        return None
+    low = text.lower()
+    for marker in (
+        "insufficient_quota",
+        "exceeded your current quota",
+        "billing",
+        "rate limit",
+        "rate_limit_exceeded",
+        "you exceeded",
+    ):
+        if marker in low:
+            return QUOTA_ERROR_MESSAGE
+    return None
+
 
 class PortalGuardian:
     def __init__(
@@ -60,12 +89,20 @@ class PortalGuardian:
                     headers=self._headers,
                 )
         except Exception as e:
-            return {"error": f"Guardian unreachable: {e}"}
+            return {"error": f"Guardian unreachable: {e}", "kind": "unreachable"}
         if resp.status_code != 200:
-            return {"error": f"Guardian {resp.status_code}: {resp.text[:200]}"}
+            body = resp.text[:400]
+            friendly = _classify_guardian_error(body)
+            if friendly:
+                return {"error": friendly, "kind": "quota"}
+            return {"error": f"Guardian {resp.status_code}: {body[:200]}", "kind": "http_error"}
         result = resp.json()
-        if result.get("refusal"):
-            return {"error": result["refusal"]}
+        refusal = result.get("refusal")
+        if refusal:
+            friendly = _classify_guardian_error(refusal)
+            if friendly:
+                return {"error": friendly, "kind": "quota"}
+            return {"error": refusal, "kind": "refusal"}
         return result.get("parsed") or {}
 
     async def check_output(self, code: str, output: str, session_id: str, user_email: str) -> dict:
@@ -83,10 +120,18 @@ class PortalGuardian:
                     headers=self._headers,
                 )
         except Exception as e:
-            return {"error": f"Guardian unreachable: {e}"}
+            return {"error": f"Guardian unreachable: {e}", "kind": "unreachable"}
         if resp.status_code != 200:
-            return {"error": f"Guardian {resp.status_code}: {resp.text[:200]}"}
+            body = resp.text[:400]
+            friendly = _classify_guardian_error(body)
+            if friendly:
+                return {"error": friendly, "kind": "quota"}
+            return {"error": f"Guardian {resp.status_code}: {body[:200]}", "kind": "http_error"}
         result = resp.json()
-        if result.get("refusal"):
-            return {"error": result["refusal"]}
+        refusal = result.get("refusal")
+        if refusal:
+            friendly = _classify_guardian_error(refusal)
+            if friendly:
+                return {"error": friendly, "kind": "quota"}
+            return {"error": refusal, "kind": "refusal"}
         return result.get("parsed") or {}

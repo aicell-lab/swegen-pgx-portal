@@ -1012,15 +1012,21 @@ async def agent_run_code(session_token: str, req: RunCodeRequest):
 
     pre = await state.guardian.check_code(req.code, session_id=session_id, user_email=user_email)
     if "error" in pre:
+        kind = pre.get("kind", "unknown")
         await state.store.append_audit(session_id, {
             "type": "guardian_error_pre",
             "error": pre["error"],
+            "kind": kind,
         })
+        ename = "GuardianUnavailable" if kind == "quota" else "GuardianError"
+        # 503 (Service Unavailable) for quota / unreachable so the agent
+        # knows it's a transient infra issue, not a user-code rejection.
+        http_status = 503 if kind in ("quota", "unreachable") else 502
         return JSONResponse({
             "stdout": "", "stderr": "", "result": None,
-            "error": {"ename": "GuardianError", "evalue": pre["error"]},
+            "error": {"ename": ename, "evalue": pre["error"]},
             "guardian": pre,
-        }, status_code=502)
+        }, status_code=http_status)
     if not pre.get("is_safe", False):
         await state.store.update_session(session_id, blocks=sess.get("blocks", 0) + 1)
         await state.store.append_audit(session_id, {
@@ -1062,6 +1068,7 @@ async def agent_run_code(session_token: str, req: RunCodeRequest):
                 await state.store.append_audit(session_id, {
                     "type": "guardian_error_post",
                     "error": post["error"],
+                    "kind": post.get("kind", "unknown"),
                 })
             elif not post.get("is_safe", False):
                 await state.store.update_session(session_id, blocks=sess.get("blocks", 0) + 1)
