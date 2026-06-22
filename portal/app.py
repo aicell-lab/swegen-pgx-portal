@@ -125,6 +125,7 @@ class AppState:
     guardian: PortalGuardian | None = None
     data_readme: str = ""
     reaper_task: asyncio.Task | None = None
+    heartbeat_task: asyncio.Task | None = None
 
 
 state = AppState()
@@ -154,6 +155,10 @@ async def lifespan(app: FastAPI):
         hypha_token=HYPHA_TOKEN,
     )
     await state.store.init()
+    # Background heartbeat: pings Hypha every 60 s and reconnects on a
+    # stalled handle, so a long-lived connection can't silently rot the
+    # way it did at 2026-06-22T15:30Z (13 days uptime → put_file timeouts).
+    state.heartbeat_task = asyncio.create_task(state.store.heartbeat_loop())
 
     async def _on_session_ended(session_id: str, reason: str):
         """Pool callback — mark the session ended in the store + audit it."""
@@ -190,6 +195,8 @@ async def lifespan(app: FastAPI):
 
     if state.reaper_task:
         state.reaper_task.cancel()
+    if state.heartbeat_task:
+        state.heartbeat_task.cancel()
     if state.pool:
         await state.pool.shutdown()
 
@@ -369,12 +376,31 @@ async def api_config():
 
 
 @app.get("/api/healthz")
-async def healthz():
-    return {
+async def healthz(deep: bool = False):
+    """Liveness/readiness probe.
+
+    Shallow (default): always 200 if the process is up — used by the
+    readinessProbe, since a momentary Hypha hiccup shouldn't shed traffic
+    (the in-process retry in the store handles transient blips).
+
+    Deep (`?deep=true`): consults the store's last-successful-RPC
+    timestamp. The heartbeat pings Hypha every 60 s and every real RPC
+    call refreshes the timestamp, so going silent for >180 s means three
+    missed pings with zero traffic — the handle is wedged. Returns 503 so
+    the K8s livenessProbe restarts the pod instead of letting it serve a
+    dead connection (the 2026-06-22T15:30Z stall).
+    """
+    since_ok = state.store.seconds_since_ok() if state.store else None
+    body = {
         "status": "ok",
         "kernels": state.pool.stats() if state.pool else {},
         "data_contract_chars": len(state.data_readme),
+        "hypha_seconds_since_ok": round(since_ok, 1) if since_ok is not None else None,
     }
+    if deep and (since_ok is None or since_ok > 180):
+        body["status"] = "stale"
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 # ─── Auth-bound endpoints ───

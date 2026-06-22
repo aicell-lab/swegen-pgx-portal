@@ -67,7 +67,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: portal
-          image: oeway/swegen-pgx-portal:0.5.3
+          image: oeway/swegen-pgx-portal:0.6.0
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -144,13 +144,29 @@ spec:
             limits:
               cpu: "2"
               memory: 4Gi
-          livenessProbe:
+          # Startup gate: hydration scans the whole state artifact (~360
+          # sequential S3 fetches) and the HTTP server doesn't accept
+          # connections until it finishes — which can exceed the liveness
+          # grace. The startupProbe holds liveness/readiness off until the
+          # server is actually serving, giving startup up to 300 s.
+          startupProbe:
             httpGet:
               path: /api/healthz
               port: 8080
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 4
+            periodSeconds: 10
+            failureThreshold: 30
+          # Deep probe: restarts the pod if the Hypha connection has gone
+          # stale (no successful RPC in >180 s). Guards against the
+          # 13-day-uptime stall seen at 2026-06-22T15:30Z.
+          livenessProbe:
+            httpGet:
+              path: /api/healthz?deep=true
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 3
+          # Shallow probe: a momentary Hypha hiccup shouldn't shed traffic;
+          # the in-process retry handles transient blips.
           readinessProbe:
             httpGet:
               path: /api/healthz

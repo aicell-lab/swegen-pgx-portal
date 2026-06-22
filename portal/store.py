@@ -60,6 +60,14 @@ class PortalStore:
         self._am = None
         self._artifact_id: str | None = None
         self._lock = asyncio.Lock()
+        # Separate lock so a stuck RPC-call holding _lock doesn't block
+        # the heartbeat / reconnect path.
+        self._conn_lock = asyncio.Lock()
+        # Timestamp of the most recent successful RPC call (or heartbeat
+        # ping). `/api/healthz?deep=true` consults this to decide if the
+        # store's connection is alive — much cheaper than firing a real
+        # RPC call on every readiness probe.
+        self._last_ok_at: float = 0.0
         self._users: dict[str, dict] = {}
         self._sessions: dict[str, dict] = {}
         self._audit: dict[str, list[dict]] = {}
@@ -70,17 +78,7 @@ class PortalStore:
 
     async def init(self):
         """Connect to Hypha, ensure the artifact exists, hydrate caches."""
-        from hypha_rpc import connect_to_server
-
-        connect_kwargs: dict[str, Any] = {
-            "server_url": self.server_url,
-            "token": self.hypha_token,
-        }
-        if self.workspace:
-            connect_kwargs["workspace"] = self.workspace
-        self._server = await connect_to_server(connect_kwargs)
-        self._am = await self._server.get_service("public/artifact-manager")
-
+        await self._connect()
         try:
             existing = await self._am.read(artifact_id=self.alias)
             self._artifact_id = existing["id"] if isinstance(existing, dict) else existing.id
@@ -97,16 +95,140 @@ class PortalStore:
             )
             self._artifact_id = created["id"] if isinstance(created, dict) else created.id
             logger.info(f"Created portal-state artifact: {self._artifact_id}")
-
+        self._mark_ok()
         await self._hydrate()
 
-    async def _stage_put(self, path: str, content: bytes, content_type: str = "application/json"):
-        """Stage a file, upload via presigned URL, commit."""
+    # ── Connection management ──────────────────────────────────────────
+
+    def _mark_ok(self):
+        self._last_ok_at = time.time()
+
+    def seconds_since_ok(self) -> float | None:
+        """Seconds since the last confirmed-healthy Hypha call. None if
+        the store has never made a successful call."""
+        if not self._last_ok_at:
+            return None
+        return time.time() - self._last_ok_at
+
+    async def _connect(self):
+        """(Re)open the hypha-rpc server + artifact-manager handles.
+
+        Long-lived hypha-rpc connections can go half-alive — TCP looks
+        connected, but RPC methods time out. This helper closes the old
+        handle and opens a fresh one. Holds `_conn_lock` so concurrent
+        retries collapse onto one reconnect, but it does NOT hold
+        `_lock`, so other writers don't block on a slow reconnect.
+        """
+        from hypha_rpc import connect_to_server
+
+        async with self._conn_lock:
+            # If another caller already reconnected since we entered this
+            # method, reuse their handles instead of duplicating work.
+            if self._am is not None and self._last_ok_at and time.time() - self._last_ok_at < 5:
+                return
+            old_server = self._server
+            self._am = None
+            self._server = None
+            connect_kwargs: dict[str, Any] = {
+                "server_url": self.server_url,
+                "token": self.hypha_token,
+            }
+            if self.workspace:
+                connect_kwargs["workspace"] = self.workspace
+            try:
+                self._server = await connect_to_server(connect_kwargs)
+                self._am = await self._server.get_service("public/artifact-manager")
+                logger.info("hypha connection (re)opened")
+            except Exception as e:
+                logger.error("hypha (re)connect failed: %s", e)
+                raise
+            if old_server is not None:
+                try:
+                    await old_server.disconnect()
+                except Exception:
+                    pass
+
+    # Errors we treat as "the long-lived RPC handle is sick — reconnect
+    # and retry." Anything else propagates as-is (legitimate server-side
+    # errors, e.g. PermissionError, ValueError).
+    _RECONNECT_EXC = (asyncio.TimeoutError, ConnectionError, OSError)
+
+    async def _call(self, fn, *args, **kwargs):
+        """Wrap one hypha-rpc method call with reconnect-on-stall retry.
+
+        We catch the small set of exceptions that indicate the long-lived
+        client is wedged, rebuild the connection, and retry exactly once.
+        On the retry we look up `fn` again on the fresh `_am` so the new
+        bound method goes through the new channel.
+        """
+        method_name = getattr(fn, "__name__", None) or getattr(fn, "name", "?")
         try:
-            await self._am.edit(artifact_id=self._artifact_id, stage=True)
+            result = await fn(*args, **kwargs)
+            self._mark_ok()
+            return result
+        except self._RECONNECT_EXC as e:
+            logger.warning("hypha-rpc %s failed (%s) — reconnecting and retrying once",
+                           method_name, type(e).__name__)
+        except Exception as e:
+            # TimeoutError lives under the asyncio namespace in Python 3.11
+            # but hypha-rpc may surface it as a plain Exception with a
+            # specific message ("Method call timed out: ..."). Sniff it.
+            msg = str(e)
+            if "timed out" in msg.lower() or "connection" in msg.lower():
+                logger.warning("hypha-rpc %s timed out — reconnecting and retrying once: %s",
+                               method_name, msg[:160])
+            else:
+                raise
+        await self._connect()
+        # Rebind the method on the fresh _am if it was an _am method.
+        new_fn = fn
+        if hasattr(self._am, method_name) and getattr(self._am, method_name, None) is not None:
+            new_fn = getattr(self._am, method_name)
+        result = await new_fn(*args, **kwargs)
+        self._mark_ok()
+        return result
+
+    async def heartbeat_loop(self, interval_sec: int = 60):
+        """Background task: ping Hypha every `interval_sec`, reconnect on failure.
+
+        On its own this isn't enough — a stall could land between two
+        pings. But combined with the retry-once-on-timeout in `_call()`
+        and the deep healthz probe (which reads `seconds_since_ok` to
+        decide if the pod is healthy), it keeps a stuck handle from
+        ever serving traffic for long.
+        """
+        while True:
+            try:
+                await asyncio.sleep(interval_sec)
+                await self._ping()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("heartbeat ping failed, will retry: %s", e)
+
+    async def _ping(self):
+        """Cheap RPC probe — confirms the handle is alive."""
+        if self._am is None or self._artifact_id is None:
+            return
+        try:
+            await self._call(self._am.list_files,
+                             artifact_id=self._artifact_id, dir_path="users")
+        except Exception as e:
+            logger.warning("ping failed even after reconnect: %s", e)
+
+    async def _stage_put(self, path: str, content: bytes, content_type: str = "application/json"):
+        """Stage a file, upload via presigned URL, commit.
+
+        Each hypha-rpc call (edit/put_file/commit) goes through `_call`
+        independently so a stale handle is reconnected and retried at the
+        exact call that stalled. The httpx PUT to the presigned URL is a
+        plain HTTP upload, not an RPC call, so it keeps its own timeout.
+        """
+        try:
+            await self._call(self._am.edit, artifact_id=self._artifact_id, stage=True)
         except Exception:
             pass
-        put_url = await self._am.put_file(artifact_id=self._artifact_id, file_path=path)
+        put_url = await self._call(self._am.put_file, artifact_id=self._artifact_id, file_path=path)
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.put(
                 put_url,
@@ -114,11 +236,11 @@ class PortalStore:
                 headers={"Content-Type": content_type, "Content-Length": str(len(content))},
             )
             resp.raise_for_status()
-        await self._am.commit(artifact_id=self._artifact_id)
+        await self._call(self._am.commit, artifact_id=self._artifact_id)
 
     async def _get_text(self, path: str) -> str | None:
         try:
-            url = await self._am.get_file(artifact_id=self._artifact_id, file_path=path)
+            url = await self._call(self._am.get_file, artifact_id=self._artifact_id, file_path=path)
         except Exception as e:
             logger.warning(f"get_file({path}) failed: {e}")
             return None
@@ -130,7 +252,7 @@ class PortalStore:
 
     async def _list(self, prefix: str = "") -> list[dict]:
         try:
-            return await self._am.list_files(artifact_id=self._artifact_id, dir_path=prefix or None)
+            return await self._call(self._am.list_files, artifact_id=self._artifact_id, dir_path=prefix or None)
         except Exception as e:
             logger.warning(f"list_files({prefix}) failed: {e}")
             return []
@@ -382,17 +504,17 @@ class PortalStore:
             if report_id not in self._reports:
                 return False
             try:
-                await self._am.edit(artifact_id=self._artifact_id, stage=True)
+                await self._call(self._am.edit, artifact_id=self._artifact_id, stage=True)
             except Exception:
                 pass
             for path in (f"reports/{report_id}/manifest.json",
                          f"reports/{report_id}/report.html"):
                 try:
-                    await self._am.remove_file(artifact_id=self._artifact_id, file_path=path)
+                    await self._call(self._am.remove_file, artifact_id=self._artifact_id, file_path=path)
                 except Exception as e:
                     logger.warning(f"delete_report remove_file({path}) failed: {e}")
             try:
-                await self._am.commit(artifact_id=self._artifact_id)
+                await self._call(self._am.commit, artifact_id=self._artifact_id)
             except Exception as e:
                 logger.warning(f"delete_report commit failed: {e}")
             self._reports.pop(report_id, None)
