@@ -50,6 +50,13 @@
       use the portal — Claude, Cursor, your own agent, etc. The Guardian
       checks every code submission against the sensitivity contract; only
       reviewed outputs are returned.</li>
+    <li><b>Sessions expire.</b> A session URL is a live kernel handle, not a
+      permanent key. It stops working when you click <em>End session</em> on
+      your dashboard, after <b>30 minutes of inactivity</b>, or <b>24 hours
+      after it was created</b> — whichever comes first. The portal may also
+      reclaim the longest-idle session when every kernel slot is in use, and
+      sessions don't survive a portal restart. When a URL stops responding,
+      just start a new session from your dashboard.</li>
   </ol>
 </div>
 
